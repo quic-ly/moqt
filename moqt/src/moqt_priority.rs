@@ -7,7 +7,7 @@ pub type MoqtPriority = u8;
 /// Indicates the desired order of delivering groups associated with a given
 /// track.
 #[allow(non_camel_case_types)]
-#[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Default, Debug, Copy, Clone, Eq, PartialEq, PartialOrd)]
 #[repr(u8)]
 pub enum MoqtDeliveryOrder {
     #[default]
