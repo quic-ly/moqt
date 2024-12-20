@@ -1,8 +1,10 @@
 use crate::{Error, Result};
 use bytes::{Buf, BufMut, Bytes};
 
+pub mod data_writer;
 pub mod parameters;
 pub mod varint;
+pub mod wire_serialization;
 
 pub trait Deserializer {
     fn deserialize<B>(r: &mut B) -> Result<(Self, usize)>

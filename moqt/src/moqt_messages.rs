@@ -482,9 +482,9 @@ pub struct MoqtObject {
     group_id: u64,
     object_id: u64,
     publisher_priority: MoqtPriority,
-    object_status: MoqtObjectStatus,
-    subgroup_id: Option<u64>,
-    payload_length: u64,
+    pub(crate) object_status: MoqtObjectStatus,
+    pub(crate) subgroup_id: Option<u64>,
+    pub(crate) payload_length: u64,
 }
 
 #[allow(non_camel_case_types)]
@@ -501,15 +501,15 @@ pub enum MoqtFilterType {
 
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtSubscribeParameters {
-    authorization_info: Option<String>,
-    delivery_timeout: Option<Duration>,
-    max_cache_duration: Option<Duration>,
+    pub(crate) authorization_info: Option<String>,
+    pub(crate) delivery_timeout: Option<Duration>,
+    pub(crate) max_cache_duration: Option<Duration>,
 
     /// If present, indicates that OBJECT_ACK messages will be sent in response to
     /// the objects on the stream. The actual value is informational, and it
     /// communicates how many frames the subscriber is willing to buffer, in
     /// microseconds.
-    object_ack_window: Option<Duration>,
+    pub(crate) object_ack_window: Option<Duration>,
 }
 
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
