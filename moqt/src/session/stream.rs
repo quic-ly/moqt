@@ -353,7 +353,7 @@ impl StreamState {
                 }
                 MoqtSubscribeOk subscribe_ok;
                 subscribe_ok.subscribe_id = message.subscribe_id;
-                SendOrBufferMessage(session_->framer_.SerializeSubscribeOk(subscribe_ok));
+                SendOrBufferMessage(session_->framer_.serialize_subscribe_ok(subscribe_ok));
                 QUIC_DLOG(INFO) << ENDPOINT << "Created subscription for "
                     << message.track_namespace << ":" << message.track_name;
                 if (!message.end_group.has_value()) {

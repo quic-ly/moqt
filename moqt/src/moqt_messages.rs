@@ -344,9 +344,9 @@ impl FullTrackName {
 /// These are absolute sequence numbers.
 #[derive(Default, Copy, Clone, Debug)]
 pub struct FullSequence {
-    group: u64,
+    pub(crate) group: u64,
     subgroup: u64,
-    object: u64,
+    pub(crate) object: u64,
 }
 
 /// These are temporal ordering comparisons, so subgroup ID doesn't matter.
@@ -384,7 +384,7 @@ impl FullSequence {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, PartialOrd)]
+#[derive(Copy, Clone, PartialEq, Debug, PartialOrd)]
 pub struct SubgroupPriority {
     publisher_priority: u8,
     subgroup_id: u64,
@@ -401,28 +401,29 @@ impl Default for SubgroupPriority {
 
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtClientSetup {
-    supported_versions: Vec<MoqtVersion>,
-    role: Option<MoqtRole>,
-    path: Option<String>,
-    max_subscribe_id: Option<u64>,
-    supports_object_ack: bool,
+    pub(crate) supported_versions: Vec<MoqtVersion>,
+    pub(crate) role: Option<MoqtRole>,
+    pub(crate) path: Option<String>,
+    pub(crate) max_subscribe_id: Option<u64>,
+    pub(crate) supports_object_ack: bool,
 }
 
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtServerSetup {
-    selected_version: MoqtVersion,
-    role: Option<MoqtRole>,
-    max_subscribe_id: Option<u64>,
-    supports_object_ack: bool,
+    pub(crate) selected_version: MoqtVersion,
+    pub(crate) role: Option<MoqtRole>,
+    pub(crate) max_subscribe_id: Option<u64>,
+    pub(crate) supports_object_ack: bool,
 }
 
 /// These codes do not appear on the wire.
 #[allow(non_camel_case_types)]
-#[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
+#[derive(Default, Copy, Clone, PartialEq, Debug, PartialOrd)]
+#[repr(u8)]
 pub enum MoqtForwardingPreference {
     #[default]
-    kSubgroup,
-    kDatagram,
+    kSubgroup = 0,
+    kDatagram = 1,
 }
 
 impl Display for MoqtForwardingPreference {
@@ -446,7 +447,7 @@ impl MoqtForwardingPreference {
 }
 
 #[allow(non_camel_case_types)]
-#[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
+#[derive(Default, Copy, Clone, PartialEq, Debug, PartialOrd)]
 #[repr(u64)]
 pub enum MoqtObjectStatus {
     #[default]
@@ -477,18 +478,18 @@ impl From<u64> for MoqtObjectStatus {
 /// implies some of the values.
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtObject {
-    track_alias: u64,
+    pub(crate) track_alias: u64,
     /// For FETCH, this is the subscribe ID.
-    group_id: u64,
-    object_id: u64,
-    publisher_priority: MoqtPriority,
+    pub(crate) group_id: u64,
+    pub(crate) object_id: u64,
+    pub(crate) publisher_priority: MoqtPriority,
     pub(crate) object_status: MoqtObjectStatus,
     pub(crate) subgroup_id: Option<u64>,
     pub(crate) payload_length: u64,
 }
 
 #[allow(non_camel_case_types)]
-#[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
+#[derive(Default, Copy, Clone, PartialEq, Debug, PartialOrd)]
 #[repr(u64)]
 pub enum MoqtFilterType {
     #[default]
@@ -514,11 +515,11 @@ pub struct MoqtSubscribeParameters {
 
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtSubscribe {
-    subscribe_id: u64,
-    track_alias: u64,
-    full_track_name: FullTrackName,
-    subscriber_priority: MoqtPriority,
-    group_order: Option<MoqtDeliveryOrder>,
+    pub(crate) subscribe_id: u64,
+    pub(crate) track_alias: u64,
+    pub(crate) full_track_name: FullTrackName,
+    pub(crate) subscriber_priority: MoqtPriority,
+    pub(crate) group_order: Option<MoqtDeliveryOrder>,
 
     // The combinations of these that have values indicate the filter type.
     // SG: Start Group; SO: Start Object; EG: End Group; EO: End Object;
@@ -528,12 +529,12 @@ pub struct MoqtSubscribe {
     // SG, SO, EG, EO: kAbsoluteRange
     // SG, SO, EG: kAbsoluteRange (request whole last group)
     // All other combinations are invalid.
-    start_group: Option<u64>,
-    start_object: Option<u64>,
-    end_group: Option<u64>,
-    end_object: Option<u64>,
+    pub(crate) start_group: Option<u64>,
+    pub(crate) start_object: Option<u64>,
+    pub(crate) end_group: Option<u64>,
+    pub(crate) end_object: Option<u64>,
     // If the mode is kNone, the these are std::nullopt.
-    parameters: MoqtSubscribeParameters,
+    pub(crate) parameters: MoqtSubscribeParameters,
 }
 
 /// Deduce the filter type from the combination of group and object IDs. Returns
@@ -582,30 +583,30 @@ pub fn get_filter_type(message: &MoqtSubscribe) -> MoqtFilterType {
 
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtSubscribeOk {
-    subscribe_id: u64,
+    pub(crate) subscribe_id: u64,
     /// The message uses ms, but expires is in us.
-    expires: Duration,
-    group_order: MoqtDeliveryOrder,
+    pub(crate) expires: Duration,
+    pub(crate) group_order: MoqtDeliveryOrder,
     /// If ContextExists on the wire is zero, largest_id has no value.
-    largest_id: Option<FullSequence>,
-    parameters: MoqtSubscribeParameters,
+    pub(crate) largest_id: Option<FullSequence>,
+    pub(crate) parameters: MoqtSubscribeParameters,
 }
 
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtSubscribeError {
-    subscribe_id: u64,
-    error_code: SubscribeErrorCode,
-    reason_phrase: String,
-    track_alias: u64,
+    pub(crate) subscribe_id: u64,
+    pub(crate) error_code: SubscribeErrorCode,
+    pub(crate) reason_phrase: String,
+    pub(crate) track_alias: u64,
 }
 
-#[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
+#[derive(Default, Copy, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtUnsubscribe {
-    subscribe_id: u64,
+    pub(crate) subscribe_id: u64,
 }
 
 #[allow(non_camel_case_types)]
-#[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
+#[derive(Default, Copy, Clone, PartialEq, Debug, PartialOrd)]
 #[repr(u64)]
 pub enum SubscribeDoneCode {
     #[default]
@@ -620,48 +621,48 @@ pub enum SubscribeDoneCode {
 
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtSubscribeDone {
-    subscribe_id: u64,
-    status_code: SubscribeDoneCode,
-    reason_phrase: String,
-    final_id: Option<FullSequence>,
+    pub(crate) subscribe_id: u64,
+    pub(crate) status_code: SubscribeDoneCode,
+    pub(crate) reason_phrase: String,
+    pub(crate) final_id: Option<FullSequence>,
 }
 
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtSubscribeUpdate {
-    subscribe_id: u64,
-    start_group: u64,
-    start_object: u64,
-    end_group: Option<u64>,
-    end_object: Option<u64>,
-    subscriber_priority: MoqtPriority,
-    parameters: MoqtSubscribeParameters,
+    pub(crate) subscribe_id: u64,
+    pub(crate) start_group: u64,
+    pub(crate) start_object: u64,
+    pub(crate) end_group: Option<u64>,
+    pub(crate) end_object: Option<u64>,
+    pub(crate) subscriber_priority: MoqtPriority,
+    pub(crate) parameters: MoqtSubscribeParameters,
 }
 
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtAnnounce {
-    track_namespace: FullTrackName,
-    parameters: MoqtSubscribeParameters,
+    pub(crate) track_namespace: FullTrackName,
+    pub(crate) parameters: MoqtSubscribeParameters,
 }
 
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtAnnounceOk {
-    track_namespace: FullTrackName,
+    pub(crate) track_namespace: FullTrackName,
 }
 
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtAnnounceError {
-    track_namespace: FullTrackName,
-    error_code: MoqtAnnounceErrorCode,
-    reason_phrase: String,
+    pub(crate) track_namespace: FullTrackName,
+    pub(crate) error_code: MoqtAnnounceErrorCode,
+    pub(crate) reason_phrase: String,
 }
 
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtUnannounce {
-    track_namespace: FullTrackName,
+    pub(crate) track_namespace: FullTrackName,
 }
 
 #[allow(non_camel_case_types)]
-#[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
+#[derive(Default, Copy, Clone, PartialEq, Debug, PartialOrd)]
 #[repr(u64)]
 pub enum MoqtTrackStatusCode {
     #[default]
@@ -683,88 +684,88 @@ pub fn does_track_status_imply_having_data(code: MoqtTrackStatusCode) -> bool {
 
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtTrackStatus {
-    full_track_name: FullTrackName,
-    status_code: MoqtTrackStatusCode,
-    last_group: u64,
-    last_object: u64,
+    pub(crate) full_track_name: FullTrackName,
+    pub(crate) status_code: MoqtTrackStatusCode,
+    pub(crate) last_group: u64,
+    pub(crate) last_object: u64,
 }
 
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtAnnounceCancel {
-    track_namespace: FullTrackName,
-    error_code: MoqtAnnounceErrorCode,
-    reason_phrase: String,
+    pub(crate) track_namespace: FullTrackName,
+    pub(crate) error_code: MoqtAnnounceErrorCode,
+    pub(crate) reason_phrase: String,
 }
 
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtTrackStatusRequest {
-    full_track_name: FullTrackName,
+    pub(crate) full_track_name: FullTrackName,
 }
 
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtGoAway {
-    new_session_uri: String,
+    pub(crate) new_session_uri: String,
 }
 
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtSubscribeAnnounces {
-    track_namespace: FullTrackName,
-    parameters: MoqtSubscribeParameters,
+    pub(crate) track_namespace: FullTrackName,
+    pub(crate) parameters: MoqtSubscribeParameters,
 }
 
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtSubscribeAnnouncesOk {
-    track_namespace: FullTrackName,
+    pub(crate) track_namespace: FullTrackName,
 }
 
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtSubscribeAnnouncesError {
-    track_namespace: FullTrackName,
-    error_code: SubscribeErrorCode,
-    reason_phrase: String,
+    pub(crate) track_namespace: FullTrackName,
+    pub(crate) error_code: SubscribeErrorCode,
+    pub(crate) reason_phrase: String,
 }
 
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtUnsubscribeAnnounces {
-    track_namespace: FullTrackName,
+    pub(crate) track_namespace: FullTrackName,
 }
 
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtMaxSubscribeId {
-    max_subscribe_id: u64,
+    pub(crate) max_subscribe_id: u64,
 }
 
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtFetch {
-    subscribe_id: u64,
-    full_track_name: FullTrackName,
-    subscriber_priority: MoqtPriority,
-    group_order: Option<MoqtDeliveryOrder>,
-    start_object: FullSequence,
+    pub(crate) subscribe_id: u64,
+    pub(crate) full_track_name: FullTrackName,
+    pub(crate) subscriber_priority: MoqtPriority,
+    pub(crate) group_order: Option<MoqtDeliveryOrder>,
+    pub(crate) start_object: FullSequence,
     /// subgroup is ignored
-    end_group: u64,
-    end_object: Option<u64>,
-    parameters: MoqtSubscribeParameters,
+    pub(crate) end_group: u64,
+    pub(crate) end_object: Option<u64>,
+    pub(crate) parameters: MoqtSubscribeParameters,
 }
 
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtFetchCancel {
-    subscribe_id: u64,
+    pub(crate) subscribe_id: u64,
 }
 
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtFetchOk {
-    subscribe_id: u64,
-    group_order: MoqtDeliveryOrder,
-    largest_id: FullSequence, // subgroup is ignored
-    parameters: MoqtSubscribeParameters,
+    pub(crate) subscribe_id: u64,
+    pub(crate) group_order: MoqtDeliveryOrder,
+    pub(crate) largest_id: FullSequence, // subgroup is ignored
+    pub(crate) parameters: MoqtSubscribeParameters,
 }
 
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtFetchError {
-    subscribe_id: u64,
-    error_code: SubscribeErrorCode,
-    reason_phrase: String,
+    pub(crate) subscribe_id: u64,
+    pub(crate) error_code: SubscribeErrorCode,
+    pub(crate) reason_phrase: String,
 }
 
 /// All of the four values in this message are encoded as varints.
@@ -772,11 +773,11 @@ pub struct MoqtFetchError {
 /// indicating the sign (0 if positive).
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtObjectAck {
-    subscribe_id: u64,
-    group_id: u64,
-    object_id: u64,
+    pub(crate) subscribe_id: u64,
+    pub(crate) group_id: u64,
+    pub(crate) object_id: u64,
     /// Positive if the object has been received before the deadline.
-    delta_from_deadline: Duration,
+    pub(crate) delta_from_deadline: Duration,
 }
 
 #[cfg(test)]

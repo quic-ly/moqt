@@ -1,3 +1,4 @@
+use crate::moqt_messages::MoqtVersion;
 use crate::serde::data_writer::DataWriter;
 use log::error;
 use std::marker::PhantomData;
@@ -114,14 +115,20 @@ impl LengthWireType for WireVarInt62 {
     }
 }
 
+impl RefWireType<'_, MoqtVersion> for WireVarInt62 {
+    fn from_ref(value: &MoqtVersion) -> Self {
+        Self(*value as u64)
+    }
+}
+
 /// Represents unframed raw string.
-pub struct WireBytes(pub String);
-impl WireType for WireBytes {
+pub struct WireBytes<'a>(pub &'a [u8]);
+impl WireType for WireBytes<'_> {
     fn get_length_on_wire(&self) -> usize {
         self.0.len()
     }
     fn serialize_into_writer(&self, writer: &mut DataWriter<'_>) -> bool {
-        writer.write_string_piece(self.0.as_str())
+        writer.write_bytes(self.0)
     }
 }
 
@@ -307,24 +314,26 @@ macro_rules! serialize_into_buffer {
     ($($data:expr),*) => {{
         let buffer_size = compute_length_on_wire!($($data),*);
         if buffer_size == 0 {
-            return Ok(BytesMut::new());
+            return BytesMut::new();
         }
 
-        // Use Vec<u8> to build the buffer
         let mut buffer = BytesMut::with_capacity(buffer_size);
+        let mut writer = DataWriter::new(&mut buffer);
 
-        if !serialize_into_writer!(&mut buffer, 0 $(, $data)*) {
-            return Err(anyhow!("Failed to serialize data"));
+        if !serialize_into_writer!(&mut writer, 0 $(, $data)*) {
+            error!("Failed to serialize data");
+            return BytesMut::new();
         }
 
         if buffer.len() != buffer_size {
-            return Err(anyhow!(
+            error!(
                 "Excess {} bytes allocated while serializing",
                 buffer_size - buffer.len()
-            ));
+            );
+            return BytesMut::new();
         }
 
-        Ok(buffer)
+        buffer
     }};
 }
 
@@ -333,24 +342,32 @@ macro_rules! serialize_into_string {
     ($($data:expr),*) => {{
         let buffer_size = compute_length_on_wire!($($data),*);
         if buffer_size == 0 {
-            return Ok(String::new());
+            return String::new();
         }
 
-        // Use Vec<u8> to build the buffer
         let mut buffer = BytesMut::with_capacity(buffer_size);
+        let mut writer = DataWriter::new(&mut buffer);
 
-        if !serialize_into_writer!(&mut buffer, 0 $(, $data)*) {
-            return Err(anyhow!("Failed to serialize data"));
+        if !serialize_into_writer!(&mut writer, 0 $(, $data)*) {
+            error!("Failed to serialize data");
+            return String::new();
         }
 
         if buffer.len() != buffer_size {
-            return Err(anyhow!(
+            error!()(
                 "Excess {} bytes allocated while serializing",
                 buffer_size - buffer.len()
-            ));
+            );
+            return String::new();
         }
 
         // Convert buffer to String
-        String::from_utf8(writer).map_err(|e| anyhow!("UTF-8 conversion error: {}", e))
+        match String::from_utf8(buffer) {
+            Ok(s) => s,
+            Err(e) => {
+                error!("UTF-8 conversion error: {}", e);
+                String::new()
+            }
+        }
     }};
 }

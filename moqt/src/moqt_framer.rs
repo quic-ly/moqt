@@ -1,8 +1,9 @@
 use crate::moqt_messages::*;
 use crate::moqt_priority::MoqtDeliveryOrder;
 use crate::serde::{data_writer::*, wire_serialization::*};
-use crate::{compute_length_on_wire, serialize_into_writer};
-
+use crate::{compute_length_on_wire, serialize_into_buffer, serialize_into_writer};
+use bytes::BytesMut;
+use log::error;
 
 // Encoding for string parameters as described in
 // https://moq-wg.github.io/moq-transport/draft-ietf-moq-transport.html#name-parameters
@@ -195,45 +196,37 @@ impl WireType for WireFullTrackName<'_> {
 #[macro_export]
 macro_rules! serialize {
     ($($data:expr),*) => {{
-        match serialize_into_buffer!($($data),*) {
-            Ok(buffer) => buffer,
-            Err(err) => {
-                error!("Failed to serialize data: {:?}", err);
-                BytesMut::new()
-            }
-        }
+        serialize_into_buffer!($($data),*)
     }};
 }
 
 #[macro_export]
 macro_rules! serialize_control_message {
     ($enum_type:expr, $($data:expr),*) => {{
-        let message_type = WireVarInt62::new($enum_type as u64);
+        let message_type = WireVarInt62($enum_type as u64);
         let payload_size = compute_length_on_wire!($($data),*);
         let buffer_size = payload_size
-            + compute_length_on_wire!(message_type, WireVarInt62::new(payload_size as u64));
+            + compute_length_on_wire!(message_type, WireVarInt62(payload_size as u64));
 
         if buffer_size == 0 {
-            return Ok(BytesMut::new());
+            return BytesMut::new();
         }
 
         let mut buffer = BytesMut::with_capacity(buffer_size);
+        let mut writer = DataWriter::new(&mut buffer);
 
-        serialize_into_writer!(
-            &mut buffer,
+        let result =  serialize_into_writer!(
+            &mut writer,
             message_type,
-            WireVarInt62::new(payload_size as u64),
+            WireVarInt62(payload_size as u64),
             $($data),*
-        ).map_err(|e| anyhow!("Failed to serialize data: {:?}", e))?;
-
-        if buffer.len() != buffer_size {
-            Err(anyhow!(
-                "Excess {} bytes allocated while serializing",
-                buffer_size - buffer.len()
-            ))?;
+        );
+        if !result || writer.remaining() != 0 {
+            error!("Failed to serialize control message: {}", $enum_type as u64);
+            return BytesMut::new();
         }
 
-        Ok(buffer)
+        buffer
     }};
 }
 
@@ -256,7 +249,6 @@ pub fn signed_var_int_serialized_form(value: i64) -> u64 {
     }
 }
 
-
 /// Serialize structured message data into a wire image. When the message format
 /// is different per |perspective| or |using_webtrans|, it will omit unnecessary
 /// fields. However, it does not enforce the presence of parameters that are
@@ -274,57 +266,555 @@ impl MoqtFramer {
         Self { using_webtrans }
     }
 
-    /*
-      // Serialize functions. Takes structured data and serializes it into a
-      // QuicheBuffer for delivery to the stream.
+    /// Serialize functions. Takes structured data and serializes it into a
+    /// QuicheBuffer for delivery to the stream.
+    /// Serializes the header for an object, including the appropriate stream
+    /// header if `is_first_in_stream` is set to true.
+    pub fn serialize_object_header(
+        &self,
+        message: &MoqtObject,
+        message_type: MoqtDataStreamType,
+        is_first_in_stream: bool,
+    ) -> BytesMut {
+        if !Self::validate_object_metadata(message, message_type) {
+            error!("Object metadata is invalid");
+            return BytesMut::new();
+        }
+        if message_type == MoqtDataStreamType::kObjectDatagram {
+            error!("Datagrams use SerializeObjectDatagram()");
+            return BytesMut::new();
+        }
+        if !is_first_in_stream {
+            match message_type {
+                MoqtDataStreamType::kStreamHeaderSubgroup => {
+                    if message.payload_length == 0 {
+                        serialize!(
+                            WireVarInt62(message.object_id),
+                            WireVarInt62(message.payload_length),
+                            WireVarInt62(message.object_status as u64)
+                        )
+                    } else {
+                        serialize!(
+                            WireVarInt62(message.object_id),
+                            WireVarInt62(message.payload_length)
+                        )
+                    }
+                }
+                MoqtDataStreamType::kStreamHeaderFetch => {
+                    if let Some(subgroup_id) = message.subgroup_id {
+                        if message.payload_length == 0 {
+                            serialize!(
+                                WireVarInt62(message.group_id),
+                                WireVarInt62(subgroup_id),
+                                WireVarInt62(message.object_id),
+                                WireUint8::new(message.publisher_priority),
+                                WireVarInt62(message.payload_length),
+                                WireVarInt62(message.object_status as u64)
+                            )
+                        } else {
+                            serialize!(
+                                WireVarInt62(message.group_id),
+                                WireVarInt62(subgroup_id),
+                                WireVarInt62(message.object_id),
+                                WireUint8::new(message.publisher_priority),
+                                WireVarInt62(message.payload_length)
+                            )
+                        }
+                    } else {
+                        error!("Message subgroup_id is none");
+                        BytesMut::new()
+                    }
+                }
+                _ => BytesMut::new(),
+            }
+        } else {
+            match message_type {
+                MoqtDataStreamType::kStreamHeaderSubgroup => {
+                    if let Some(subgroup_id) = message.subgroup_id {
+                        if message.payload_length == 0 {
+                            serialize!(
+                                WireVarInt62(message_type as u64),
+                                WireVarInt62(message.track_alias),
+                                WireVarInt62(message.group_id),
+                                WireVarInt62(subgroup_id),
+                                WireUint8::new(message.publisher_priority),
+                                WireVarInt62(message.object_id),
+                                WireVarInt62(message.payload_length),
+                                WireVarInt62(message.object_status as u64)
+                            )
+                        } else {
+                            serialize!(
+                                WireVarInt62(message_type as u64),
+                                WireVarInt62(message.track_alias),
+                                WireVarInt62(message.group_id),
+                                WireVarInt62(subgroup_id),
+                                WireUint8::new(message.publisher_priority),
+                                WireVarInt62(message.object_id),
+                                WireVarInt62(message.payload_length)
+                            )
+                        }
+                    } else {
+                        error!("Message subgroup_id is none");
+                        BytesMut::new()
+                    }
+                }
 
-      // Serializes the header for an object, including the appropriate stream
-      // header if `is_first_in_stream` is set to true.
-      quiche::QuicheBuffer SerializeObjectHeader(const MoqtObject& message,
-                                                 MoqtDataStreamType message_type,
-                                                 bool is_first_in_stream) {
-
+                MoqtDataStreamType::kStreamHeaderFetch => {
+                    if let Some(subgroup_id) = message.subgroup_id {
+                        if message.payload_length == 0 {
+                            serialize!(
+                                WireVarInt62(message_type as u64),
+                                WireVarInt62(message.track_alias),
+                                WireVarInt62(message.group_id),
+                                WireVarInt62(subgroup_id),
+                                WireVarInt62(message.object_id),
+                                WireUint8::new(message.publisher_priority),
+                                WireVarInt62(message.payload_length),
+                                WireVarInt62(message.object_status as u64)
+                            )
+                        } else {
+                            serialize!(
+                                WireVarInt62(message_type as u64),
+                                WireVarInt62(message.track_alias),
+                                WireVarInt62(message.group_id),
+                                WireVarInt62(subgroup_id),
+                                WireVarInt62(message.object_id),
+                                WireUint8::new(message.publisher_priority),
+                                WireVarInt62(message.payload_length)
+                            )
+                        }
+                    } else {
+                        error!("Message subgroup_id is none");
+                        BytesMut::new()
+                    }
+                }
+                _ => BytesMut::new(),
+            }
+        }
     }
 
-      quiche::QuicheBuffer SerializeObjectDatagram(const MoqtObject& message,
-                                                   absl::string_view payload);
-      quiche::QuicheBuffer SerializeClientSetup(const MoqtClientSetup& message);
-      quiche::QuicheBuffer SerializeServerSetup(const MoqtServerSetup& message);
-      // Returns an empty buffer if there is an illegal combination of locations.
-      quiche::QuicheBuffer SerializeSubscribe(const MoqtSubscribe& message);
-      quiche::QuicheBuffer SerializeSubscribeOk(const MoqtSubscribeOk& message);
-      quiche::QuicheBuffer SerializeSubscribeError(
-          const MoqtSubscribeError& message);
-      quiche::QuicheBuffer SerializeUnsubscribe(const MoqtUnsubscribe& message);
-      quiche::QuicheBuffer SerializeSubscribeDone(const MoqtSubscribeDone& message);
-      quiche::QuicheBuffer SerializeSubscribeUpdate(
-          const MoqtSubscribeUpdate& message);
-      quiche::QuicheBuffer SerializeAnnounce(const MoqtAnnounce& message);
-      quiche::QuicheBuffer SerializeAnnounceOk(const MoqtAnnounceOk& message);
-      quiche::QuicheBuffer SerializeAnnounceError(const MoqtAnnounceError& message);
-      quiche::QuicheBuffer SerializeAnnounceCancel(
-          const MoqtAnnounceCancel& message);
-      quiche::QuicheBuffer SerializeTrackStatusRequest(
-          const MoqtTrackStatusRequest& message);
-      quiche::QuicheBuffer SerializeUnannounce(const MoqtUnannounce& message);
-      quiche::QuicheBuffer SerializeTrackStatus(const MoqtTrackStatus& message);
-      quiche::QuicheBuffer SerializeGoAway(const MoqtGoAway& message);
-      quiche::QuicheBuffer SerializeSubscribeAnnounces(
-          const MoqtSubscribeAnnounces& message);
-      quiche::QuicheBuffer SerializeSubscribeAnnouncesOk(
-          const MoqtSubscribeAnnouncesOk& message);
-      quiche::QuicheBuffer SerializeSubscribeAnnouncesError(
-          const MoqtSubscribeAnnouncesError& message);
-      quiche::QuicheBuffer SerializeUnsubscribeAnnounces(
-          const MoqtUnsubscribeAnnounces& message);
-      quiche::QuicheBuffer SerializeMaxSubscribeId(
-          const MoqtMaxSubscribeId& message);
-      quiche::QuicheBuffer SerializeFetch(const MoqtFetch& message);
-      quiche::QuicheBuffer SerializeFetchCancel(const MoqtFetchCancel& message);
-      quiche::QuicheBuffer SerializeFetchOk(const MoqtFetchOk& message);
-      quiche::QuicheBuffer SerializeFetchError(const MoqtFetchError& message);
-      quiche::QuicheBuffer SerializeObjectAck(const MoqtObjectAck& message);
-    */
+    pub fn serialize_object_datagram(&self, message: &MoqtObject, payload: &[u8]) -> BytesMut {
+        if !Self::validate_object_metadata(message, MoqtDataStreamType::kObjectDatagram) {
+            error!("Object metadata is invalid");
+            return BytesMut::new();
+        }
+        if message.payload_length != payload.len() as u64 {
+            error!("Payload length does not match payload");
+            return BytesMut::new();
+        }
+        if message.payload_length == 0 {
+            serialize!(
+                WireVarInt62(MoqtDataStreamType::kObjectDatagram as u64),
+                WireVarInt62(message.track_alias),
+                WireVarInt62(message.group_id),
+                WireVarInt62(message.object_id),
+                WireUint8::new(message.publisher_priority),
+                WireVarInt62(message.payload_length),
+                WireVarInt62(message.object_status as u64)
+            )
+        } else {
+            serialize!(
+                WireVarInt62(MoqtDataStreamType::kObjectDatagram as u64),
+                WireVarInt62(message.track_alias),
+                WireVarInt62(message.group_id),
+                WireVarInt62(message.object_id),
+                WireUint8::new(message.publisher_priority),
+                WireVarInt62(message.payload_length),
+                WireBytes(payload)
+            )
+        }
+    }
+
+    pub fn serialize_client_setup(&self, message: &MoqtClientSetup) -> BytesMut {
+        let mut int_parameters = vec![];
+        let mut string_parameters = vec![];
+        if let Some(role) = message.role {
+            int_parameters.push(IntParameter::new(
+                MoqtSetupParameter::kRole as u64,
+                role as u64,
+            ));
+        }
+        if let Some(max_subscribe_id) = message.max_subscribe_id {
+            int_parameters.push(IntParameter::new(
+                MoqtSetupParameter::kMaxSubscribeId as u64,
+                max_subscribe_id,
+            ));
+        }
+        if message.supports_object_ack {
+            int_parameters.push(IntParameter::new(
+                MoqtSetupParameter::kSupportObjectAcks as u64,
+                1,
+            ));
+        }
+        if !self.using_webtrans {
+            if let Some(path) = &message.path {
+                string_parameters.push(StringParameter::new(
+                    MoqtSetupParameter::kPath as u64,
+                    path.to_string(),
+                ));
+            }
+        }
+        serialize_control_message!(
+            MoqtMessageType::kClientSetup,
+            WireVarInt62(message.supported_versions.len() as u64),
+            WireSpan::<WireVarInt62, MoqtVersion>::new(&message.supported_versions),
+            WireVarInt62((string_parameters.len() + int_parameters.len()) as u64),
+            WireSpan::<WireIntParameter<'_>, IntParameter>::new(&int_parameters),
+            WireSpan::<WireStringParameter<'_>, StringParameter>::new(&string_parameters)
+        )
+    }
+    pub fn serialize_server_setup(&self, message: &MoqtServerSetup) -> BytesMut {
+        let mut int_parameters = vec![];
+        if let Some(role) = message.role {
+            int_parameters.push(IntParameter::new(
+                MoqtSetupParameter::kRole as u64,
+                role as u64,
+            ));
+        }
+        if let Some(max_subscribe_id) = message.max_subscribe_id {
+            int_parameters.push(IntParameter::new(
+                MoqtSetupParameter::kMaxSubscribeId as u64,
+                max_subscribe_id,
+            ));
+        }
+        if message.supports_object_ack {
+            int_parameters.push(IntParameter::new(
+                MoqtSetupParameter::kSupportObjectAcks as u64,
+                1,
+            ));
+        }
+        serialize_control_message!(
+            MoqtMessageType::kServerSetup,
+            WireVarInt62(message.selected_version as u64),
+            WireVarInt62(int_parameters.len() as u64),
+            WireSpan::<WireIntParameter<'_>, IntParameter>::new(&int_parameters)
+        )
+    }
+    // Returns an empty buffer if there is an illegal combination of locations.
+    pub fn serialize_subscribe(&self, message: &MoqtSubscribe) -> BytesMut {
+        let filter_type = get_filter_type(message);
+        if filter_type == MoqtFilterType::kNone {
+            error!("Invalid object range");
+            return BytesMut::new();
+        }
+        match filter_type {
+            MoqtFilterType::kLatestGroup | MoqtFilterType::kLatestObject => {
+                serialize_control_message!(
+                    MoqtMessageType::kSubscribe,
+                    WireVarInt62(message.subscribe_id),
+                    WireVarInt62(message.track_alias),
+                    WireFullTrackName::new(&message.full_track_name, true),
+                    WireUint8::new(message.subscriber_priority),
+                    wire_delivery_order(&message.group_order),
+                    WireVarInt62(filter_type as u64),
+                    WireSubscribeParameterList(&message.parameters)
+                )
+            }
+            MoqtFilterType::kAbsoluteStart => {
+                if let (Some(start_group), Some(start_object)) =
+                    (message.start_group, message.start_object)
+                {
+                    serialize_control_message!(
+                        MoqtMessageType::kSubscribe,
+                        WireVarInt62(message.subscribe_id),
+                        WireVarInt62(message.track_alias),
+                        WireFullTrackName::new(&message.full_track_name, true),
+                        WireUint8::new(message.subscriber_priority),
+                        wire_delivery_order(&message.group_order),
+                        WireVarInt62(filter_type as u64),
+                        WireVarInt62(start_group),
+                        WireVarInt62(start_object),
+                        WireSubscribeParameterList(&message.parameters)
+                    )
+                } else {
+                    error!("Subscribe framing error due to empty start group/object in MoqtFilterType::kAbsoluteStart");
+                    BytesMut::new()
+                }
+            }
+            MoqtFilterType::kAbsoluteRange => {
+                if let (Some(start_group), Some(end_group), Some(start_object)) =
+                    (message.start_group, message.end_group, message.start_object)
+                {
+                    serialize_control_message!(
+                        MoqtMessageType::kSubscribe,
+                        WireVarInt62(message.subscribe_id),
+                        WireVarInt62(message.track_alias),
+                        WireFullTrackName::new(&message.full_track_name, true),
+                        WireUint8::new(message.subscriber_priority),
+                        wire_delivery_order(&message.group_order),
+                        WireVarInt62(filter_type as u64),
+                        WireVarInt62(start_group),
+                        WireVarInt62(start_object),
+                        WireVarInt62(end_group),
+                        WireVarInt62(if let Some(end_object) = message.end_object {
+                            end_object + 1
+                        } else {
+                            0
+                        }),
+                        WireSubscribeParameterList(&message.parameters)
+                    )
+                } else {
+                    error!("Subscribe framing error due to empty start group/object or end group in MoqtFilterType::kAbsoluteRange");
+                    BytesMut::new()
+                }
+            }
+            _ => {
+                error!("Subscribe framing error.");
+                BytesMut::new()
+            }
+        }
+    }
+    pub fn serialize_subscribe_ok(&self, message: &MoqtSubscribeOk) -> BytesMut {
+        if message.parameters.authorization_info.is_some() {
+            error!("SUBSCRIBE_OK with delivery timeout");
+            return BytesMut::new();
+        }
+        if let Some(largest_id) = &message.largest_id {
+            serialize_control_message!(
+                MoqtMessageType::kSubscribeOk,
+                WireVarInt62(message.subscribe_id),
+                WireVarInt62(message.expires.as_millis() as u64),
+                wire_delivery_order(&Some(message.group_order)),
+                WireUint8::new(1),
+                WireVarInt62(largest_id.group),
+                WireVarInt62(largest_id.object),
+                WireSubscribeParameterList(&message.parameters)
+            )
+        } else {
+            serialize_control_message!(
+                MoqtMessageType::kSubscribeOk,
+                WireVarInt62(message.subscribe_id),
+                WireVarInt62(message.expires.as_millis() as u64),
+                wire_delivery_order(&Some(message.group_order)),
+                WireUint8::new(0),
+                WireSubscribeParameterList(&message.parameters)
+            )
+        }
+    }
+    pub fn serialize_subscribe_error(&self, message: &MoqtSubscribeError) -> BytesMut {
+        serialize_control_message!(
+            MoqtMessageType::kSubscribeError,
+            WireVarInt62(message.subscribe_id),
+            WireVarInt62(message.error_code as u64),
+            WireStringWithVarInt62Length::new(message.reason_phrase.as_str()),
+            WireVarInt62(message.track_alias)
+        )
+    }
+    pub fn serialize_unsubscribe(&self, message: &MoqtUnsubscribe) -> BytesMut {
+        serialize_control_message!(
+            MoqtMessageType::kUnsubscribe,
+            WireVarInt62(message.subscribe_id)
+        )
+    }
+    pub fn serialize_subscribe_done(&self, message: &MoqtSubscribeDone) -> BytesMut {
+        if let Some(final_id) = &message.final_id {
+            serialize_control_message!(
+                MoqtMessageType::kSubscribeDone,
+                WireVarInt62(message.subscribe_id),
+                WireVarInt62(message.status_code as u64),
+                WireStringWithVarInt62Length::new(message.reason_phrase.as_str()),
+                WireUint8::new(1),
+                WireVarInt62(final_id.group),
+                WireVarInt62(final_id.object)
+            )
+        } else {
+            serialize_control_message!(
+                MoqtMessageType::kSubscribeDone,
+                WireVarInt62(message.subscribe_id),
+                WireVarInt62(message.status_code as u64),
+                WireStringWithVarInt62Length::new(message.reason_phrase.as_str()),
+                WireUint8::new(0)
+            )
+        }
+    }
+    pub fn serialize_subscribe_update(&self, message: &MoqtSubscribeUpdate) -> BytesMut {
+        if message.parameters.authorization_info.is_some() {
+            error!("SUBSCRIBE_UPDATE with authorization info");
+            return BytesMut::new();
+        }
+        let end_group = if let Some(end_group) = message.end_group {
+            end_group + 1
+        } else {
+            0
+        };
+        let end_object = if let Some(end_object) = message.end_object {
+            end_object + 1
+        } else {
+            0
+        };
+        if end_group == 0 && end_object != 0 {
+            error!("Invalid object range");
+            return BytesMut::new();
+        }
+        serialize_control_message!(
+            MoqtMessageType::kSubscribeUpdate,
+            WireVarInt62(message.subscribe_id),
+            WireVarInt62(message.start_group),
+            WireVarInt62(message.start_object),
+            WireVarInt62(end_group),
+            WireVarInt62(end_object),
+            WireUint8::new(message.subscriber_priority),
+            WireSubscribeParameterList(&message.parameters)
+        )
+    }
+    pub fn serialize_announce(&self, message: &MoqtAnnounce) -> BytesMut {
+        if message.parameters.delivery_timeout.is_some() {
+            error!("ANNOUNCE with delivery timeout");
+            return BytesMut::new();
+        }
+        serialize_control_message!(
+            MoqtMessageType::kAnnounce,
+            WireFullTrackName::new(&message.track_namespace, false),
+            WireSubscribeParameterList(&message.parameters)
+        )
+    }
+    pub fn serialize_announce_ok(&self, message: &MoqtAnnounceOk) -> BytesMut {
+        serialize_control_message!(
+            MoqtMessageType::kAnnounceOk,
+            WireFullTrackName::new(&message.track_namespace, false)
+        )
+    }
+    pub fn serialize_announce_error(&self, message: &MoqtAnnounceError) -> BytesMut {
+        serialize_control_message!(
+            MoqtMessageType::kAnnounceError,
+            WireFullTrackName::new(&message.track_namespace, false),
+            WireVarInt62(message.error_code as u64),
+            WireStringWithVarInt62Length::new(message.reason_phrase.as_str())
+        )
+    }
+    pub fn serialize_announce_cancel(&self, message: &MoqtAnnounceCancel) -> BytesMut {
+        serialize_control_message!(
+            MoqtMessageType::kAnnounceCancel,
+            WireFullTrackName::new(&message.track_namespace, false),
+            WireVarInt62(message.error_code as u64),
+            WireStringWithVarInt62Length::new(message.reason_phrase.as_str())
+        )
+    }
+    pub fn serialize_track_status_request(&self, message: &MoqtTrackStatusRequest) -> BytesMut {
+        serialize_control_message!(
+            MoqtMessageType::kTrackStatusRequest,
+            WireFullTrackName::new(&message.full_track_name, true)
+        )
+    }
+    pub fn serialize_unannounce(&self, message: &MoqtUnannounce) -> BytesMut {
+        serialize_control_message!(
+            MoqtMessageType::kUnannounce,
+            WireFullTrackName::new(&message.track_namespace, false)
+        )
+    }
+    pub fn serialize_track_status(&self, message: &MoqtTrackStatus) -> BytesMut {
+        serialize_control_message!(
+            MoqtMessageType::kTrackStatus,
+            WireFullTrackName::new(&message.full_track_name, true),
+            WireVarInt62(message.status_code as u64),
+            WireVarInt62(message.last_group),
+            WireVarInt62(message.last_object)
+        )
+    }
+    pub fn serialize_go_away(&self, message: &MoqtGoAway) -> BytesMut {
+        serialize_control_message!(
+            MoqtMessageType::kGoAway,
+            WireStringWithVarInt62Length::new(message.new_session_uri.as_str())
+        )
+    }
+    pub fn serialize_subscribe_announces(&self, message: &MoqtSubscribeAnnounces) -> BytesMut {
+        serialize_control_message!(
+            MoqtMessageType::kSubscribeAnnounces,
+            WireFullTrackName::new(&message.track_namespace, false),
+            WireSubscribeParameterList(&message.parameters)
+        )
+    }
+    pub fn serialize_subscribe_announces_ok(&self, message: &MoqtSubscribeAnnouncesOk) -> BytesMut {
+        serialize_control_message!(
+            MoqtMessageType::kSubscribeAnnouncesOk,
+            WireFullTrackName::new(&message.track_namespace, false)
+        )
+    }
+    pub fn serialize_subscribe_announces_error(
+        &self,
+        message: &MoqtSubscribeAnnouncesError,
+    ) -> BytesMut {
+        serialize_control_message!(
+            MoqtMessageType::kSubscribeAnnouncesError,
+            WireFullTrackName::new(&message.track_namespace, false),
+            WireVarInt62(message.error_code as u64),
+            WireStringWithVarInt62Length::new(message.reason_phrase.as_str())
+        )
+    }
+    pub fn serialize_unsubscribe_announces(&self, message: &MoqtUnsubscribeAnnounces) -> BytesMut {
+        serialize_control_message!(
+            MoqtMessageType::kUnsubscribeAnnounces,
+            WireFullTrackName::new(&message.track_namespace, false)
+        )
+    }
+    pub fn serialize_max_subscribe_id(&self, message: &MoqtMaxSubscribeId) -> BytesMut {
+        serialize_control_message!(
+            MoqtMessageType::kMaxSubscribeId,
+            WireVarInt62(message.max_subscribe_id)
+        )
+    }
+    pub fn serialize_fetch(&self, message: &MoqtFetch) -> BytesMut {
+        if message.end_group < message.start_object.group
+            || (message.end_group == message.start_object.group
+            && message.end_object.is_some()
+            && *message.end_object.as_ref().unwrap() < message.start_object.object)
+        {
+            error!("Invalid FETCH object range");
+            return BytesMut::new();
+        }
+        serialize_control_message!(
+            MoqtMessageType::kFetch,
+            WireVarInt62(message.subscribe_id),
+            WireFullTrackName::new(&message.full_track_name, true),
+            WireUint8::new(message.subscriber_priority),
+            wire_delivery_order(&message.group_order),
+            WireVarInt62(message.start_object.group),
+            WireVarInt62(message.start_object.object),
+            WireVarInt62(message.end_group),
+            WireVarInt62(if let Some(end_object) = message.end_object {
+                end_object + 1
+            } else {
+                0
+            }),
+            WireSubscribeParameterList(&message.parameters)
+        )
+    }
+    pub fn serialize_fetch_cancel(&self, message: &MoqtFetchCancel) -> BytesMut {
+        serialize_control_message!(
+            MoqtMessageType::kFetchCancel,
+            WireVarInt62(message.subscribe_id)
+        )
+    }
+    pub fn serialize_fetch_ok(&self, message: &MoqtFetchOk) -> BytesMut {
+        serialize_control_message!(
+            MoqtMessageType::kFetchOk,
+            WireVarInt62(message.subscribe_id),
+            wire_delivery_order(&Some(message.group_order)),
+            WireVarInt62(message.largest_id.group),
+            WireVarInt62(message.largest_id.object),
+            WireSubscribeParameterList(&message.parameters)
+        )
+    }
+    pub fn serialize_fetch_error(&self, message: &MoqtFetchError) -> BytesMut {
+        serialize_control_message!(
+            MoqtMessageType::kFetchError,
+            WireVarInt62(message.subscribe_id),
+            WireVarInt62(message.error_code as u64),
+            WireStringWithVarInt62Length::new(message.reason_phrase.as_str())
+        )
+    }
+    pub fn serialize_object_ack(&self, message: &MoqtObjectAck) -> BytesMut {
+        serialize_control_message!(
+            MoqtMessageType::kObjectAck,
+            WireVarInt62(message.subscribe_id),
+            WireVarInt62(message.group_id),
+            WireVarInt62(message.object_id),
+            WireVarInt62(signed_var_int_serialized_form(
+                message.delta_from_deadline.as_micros() as i64
+            ))
+        )
+    }
+
     // Returns true if the metadata is internally consistent.
     fn validate_object_metadata(object: &MoqtObject, message_type: MoqtDataStreamType) -> bool {
         if object.object_status != MoqtObjectStatus::kNormal && object.payload_length > 0 {
