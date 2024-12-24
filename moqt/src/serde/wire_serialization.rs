@@ -15,7 +15,6 @@ pub trait RefWireType<'a, T>: WireType {
     fn from_ref(value: &'a T) -> Self;
 }
 
-
 // ------------------- WireType() wrapper definitions -------------------
 // Base struct for WireUint8/16/32/64
 pub struct WireFixedSizeIntBase<T>
@@ -178,7 +177,6 @@ where
 /// Represents VarInt62-prefixed strings.
 pub type WireStringWithVarInt62Length<'a> = WireStringWithLengthPrefix<'a, WireVarInt62>;
 
-
 /// Allows std::optional to be used with this API. For instance, if the spec
 /// defines
 ///   [Context ID (i)]
@@ -223,7 +221,6 @@ where
         }
     }
 }
-
 
 /// Allows multiple entries of the same type to be serialized in a single call.
 pub struct WireSpan<'a, W, T> {
@@ -300,7 +297,6 @@ macro_rules! serialize_into_writer {
     }};
 }
 
-
 /// SerializeIntoBuffer(allocator, d1, d2, ... dN) computes the length required
 /// to store the supplied data, allocates the buffer of appropriate size using
 /// |allocator|, and serializes the result into it.  In a rare event that the
@@ -311,11 +307,11 @@ macro_rules! serialize_into_buffer {
     ($($data:expr),*) => {{
         let buffer_size = compute_length_on_wire!($($data),*);
         if buffer_size == 0 {
-            return Ok(Vec::new());
+            return Ok(BytesMut::new());
         }
 
         // Use Vec<u8> to build the buffer
-        let mut buffer = Vec::with_capacity(buffer_size);
+        let mut buffer = BytesMut::with_capacity(buffer_size);
 
         if !serialize_into_writer!(&mut buffer, 0 $(, $data)*) {
             return Err(anyhow!("Failed to serialize data"));
@@ -341,7 +337,7 @@ macro_rules! serialize_into_string {
         }
 
         // Use Vec<u8> to build the buffer
-        let mut buffer = Vec::with_capacity(buffer_size);
+        let mut buffer = BytesMut::with_capacity(buffer_size);
 
         if !serialize_into_writer!(&mut buffer, 0 $(, $data)*) {
             return Err(anyhow!("Failed to serialize data"));
@@ -354,7 +350,7 @@ macro_rules! serialize_into_string {
             ));
         }
 
-        // Convert buffer (Vec<u8>) to String
+        // Convert buffer to String
         String::from_utf8(writer).map_err(|e| anyhow!("UTF-8 conversion error: {}", e))
     }};
 }

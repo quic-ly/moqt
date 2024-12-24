@@ -24,7 +24,7 @@ impl ClientSetup {
 impl Deserializer for ClientSetup {
     fn deserialize<R: Buf>(r: &mut R) -> Result<(Self, usize)> {
         let (number_supported_versions, mut tl) = usize::deserialize(r)?;
-        let mut supported_versions = Vec::with_capacity(number_supported_versions);
+        let mut supported_versions = BytesMut::with_capacity(number_supported_versions);
         for _ in 0..number_supported_versions {
             let (version, vl) = Version::deserialize(r)?;
             supported_versions.push(version);

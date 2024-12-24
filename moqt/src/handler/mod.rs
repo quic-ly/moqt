@@ -1,4 +1,3 @@
-use crate::Result;
 use retty::transport::Transmit;
 use std::time::Instant;
 
