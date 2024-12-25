@@ -1,37 +1,42 @@
-use crate::message::announce::Announce;
-use crate::message::announce_cancel::AnnounceCancel;
-use crate::message::announce_error::AnnounceError;
-use crate::message::announce_ok::AnnounceOk;
-use crate::message::client_setup::ClientSetup;
-use crate::message::go_away::GoAway;
-use crate::message::object::{ObjectHeader, ObjectStatus};
-use crate::message::server_setup::ServerSetup;
-use crate::message::subscribe::Subscribe;
-use crate::message::subscribe_done::SubscribeDone;
-use crate::message::subscribe_error::{SubscribeError, SubscribeErrorCode};
-use crate::message::subscribe_ok::SubscribeOk;
-use crate::message::subscribe_update::SubscribeUpdate;
-use crate::message::track_status::{TrackStatus, TrackStatusCode};
-use crate::message::track_status_request::TrackStatusRequest;
-use crate::message::unannounce::UnAnnounce;
-use crate::message::unsubscribe::UnSubscribe;
-use crate::message::{ControlMessage, MessageType, Version, MAX_MESSSAGE_HEADER_SIZE};
-use crate::message::{FilterType, FullSequence, Role};
-use crate::{Deserializer, Error, Result, Serializer, VarInt};
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, BytesMut};
 use std::ops::{Deref, DerefMut};
+use crate::moqt_messages::{kMaxMessageHeaderSize, MoqtMessageType};
+use crate::serde::data_writer::DataWriter;
 
 pub(crate) enum MessageStructuredData {
-    Control(ControlMessage),
-    Object(ObjectHeader),
+    MoqtClientSetup,
+    MoqtServerSetup,
+    MoqtObject,
+    MoqtSubscribe,
+    MoqtSubscribeOk,
+    MoqtSubscribeError,
+    MoqtUnsubscribe,
+    MoqtSubscribeDone,
+    MoqtSubscribeUpdate,
+    MoqtAnnounce,
+    MoqtAnnounceOk,
+    MoqtAnnounceError,
+    MoqtAnnounceCancel,
+    MoqtTrackStatusRequest,
+    MoqtUnannounce,
+    MoqtTrackStatus,
+    MoqtGoAway,
+    MoqtSubscribeAnnounces,
+    MoqtSubscribeAnnouncesOk,
+    MoqtSubscribeAnnouncesError,
+    MoqtUnsubscribeAnnounces,
+    MoqtMaxSubscribeId,
+    MoqtFetch,
+    MoqtFetchCancel,
+    MoqtFetchOk,
+    MoqtFetchError,
+    MoqtObjectAck,
 }
 
 // Base class containing a wire image and the corresponding structured
 // representation of an example of each message. It allows parser and framer
 // tests to iterate through all message types without much specialized code.
 pub(crate) trait TestMessageBase {
-    fn packet_sample(&self) -> &[u8];
-
     // Returns a copy of the structured data for the message.
     fn structured_data(&self) -> MessageStructuredData;
 
@@ -41,25 +46,25 @@ pub(crate) trait TestMessageBase {
 
     // Expand all varints in the message. This is pure virtual because each
     // message has a different layout of varints.
-    fn expand_varints(&mut self) -> Result<()>;
+    fn expand_varints(&mut self) -> bool;
 }
 
 pub(crate) struct TestMessage {
-    message_type: MessageType,
-    wire_image: [u8; MAX_MESSSAGE_HEADER_SIZE + 20],
+    message_type: MoqtMessageType,
+    wire_image: [u8; kMaxMessageHeaderSize + 20],
     wire_image_size: usize,
 }
 
 impl TestMessage {
-    fn new(message_type: MessageType) -> Self {
+    fn new(message_type: MoqtMessageType) -> Self {
         Self {
             message_type,
-            wire_image: [0u8; MAX_MESSSAGE_HEADER_SIZE + 20],
+            wire_image: [0u8; kMaxMessageHeaderSize + 20],
             wire_image_size: 0,
         }
     }
 
-    fn message_type(&self) -> MessageType {
+    fn message_type(&self) -> MoqtMessageType {
         self.message_type
     }
 
@@ -68,8 +73,8 @@ impl TestMessage {
         self.wire_image_size
     }
 
-    fn wire_image(&self) -> &[u8] {
-        &self.wire_image[..self.wire_image_size]
+    fn packet_sample(&self) -> &[u8] {
+        &self.wire_image[0..self.wire_image_size]
     }
 
     pub(crate) fn set_wire_image_size(&mut self, wire_image_size: usize) {
@@ -81,34 +86,17 @@ impl TestMessage {
         self.wire_image_size = wire_image_size;
     }
 
-    fn write_var_int62with_forced_length<W: BufMut>(
-        v: u64,
-        w: &mut W,
-        write_length: usize,
-    ) -> Result<usize> {
-        let vi: VarInt = v.try_into()?;
-        let min_length = vi.size();
-
-        if write_length == min_length {
-            vi.serialize(w)
-        } else if write_length == 2 {
-            w.put_u8(0b01000000);
-            w.put_u8(v as u8);
-            Ok(2)
-        } else if write_length == 4 {
-            w.put_u8(0b10000000);
-            w.put_u8(0);
-            w.put_u16(v as u16);
-            Ok(4)
-        } else if write_length == 8 {
-            w.put_u8(0b11000000);
-            w.put_u8(0);
-            w.put_u16(0);
-            w.put_u32(v as u32);
-            Ok(8)
-        } else {
-            Err(Error::ErrBufferTooShort)
-        }
+    // This will cause a parsing error. Do not call this on Object Messages.
+    fn decrease_payload_length_by_one(&mut self) {
+        let length_offset =
+            0x1usize << ((self.wire_image[0] & 0xc0) >> 6);
+        self.wire_image[length_offset] -= 1;
+    }
+    fn increase_payload_length_by_one(&mut self) {
+        let length_offset =
+            0x1usize << ((self.wire_image[0] & 0xc0) >> 6);
+        self.wire_image[length_offset] += 1;
+        self.set_wire_image_size(self.wire_image_size + 1);
     }
 
     // Expands all the varints in the message, alternating between making them 2,
@@ -116,17 +104,73 @@ impl TestMessage {
     // Each character in |varints| corresponds to a byte in the original message.
     // If there is a 'v', it is a varint that should be expanded. If '-', skip
     // to the next byte.
-    fn expand_varints_impl(&mut self, varints: &[u8]) -> Result<()> {
+    fn expand_varints_impl(&mut self, varints: &[u8], is_control_message: bool) -> bool {
         let mut next_varint_len = 2;
+        let mut new_wire_image = BytesMut::with_capacity(kMaxMessageHeaderSize + 1);
         let mut reader = &self.wire_image[..self.wire_image_size];
-        let mut writer = vec![];
+        let mut writer = DataWriter::new(&mut new_wire_image);
+        let mut i = 0;
+        let mut length_field = 0;
+        if is_control_message {
+            // the length will be a 16-bit varint.
+            let mut nonvarint_type = false;
+            while varints[i] == b'-' {
+                i+=1;
+                nonvarint_type = true;
+                writer.write_uint8(reader.get_u8());
+            }
+            let mut value: u64;
+            if !nonvarint_type {
+                i+=1;
+                reader.ReadVarInt62(&value);
+                writer.WriteVarInt62WithForcedLength(
+                    value, static_cast<quiche::QuicheVariableLengthIntegerLength>(
+                        next_varint_len));
+                next_varint_len *= 2;
+                if (next_varint_len == 16) {
+                    next_varint_len = 2;
+                }
+            }
+            reader.ReadVarInt62(&value);
+            ++i;
+            length_field = writer.length();
+            // Write in current length as a 2B placeholder.
+            writer.WriteVarInt62WithForcedLength(
+                value, static_cast<quiche::QuicheVariableLengthIntegerLength>(2));
+        }
+        while (!reader.IsDoneReading()) {
+            if (i >= varints.length() || varints[i++] == '-') {
+                uint8_t byte;
+                reader.ReadUInt8(&byte);
+                writer.WriteUInt8(byte);
+                continue;
+            }
+            uint64_t value;
+            reader.ReadVarInt62(&value);
+            writer.WriteVarInt62WithForcedLength(
+                value, static_cast<quiche::QuicheVariableLengthIntegerLength>(
+                    next_varint_len));
+            next_varint_len *= 2;
+            if (next_varint_len == 16) {
+                next_varint_len = 2;
+            }
+        }
+        memcpy(wire_image_, new_wire_image, writer.length());
+        wire_image_size_ = writer.length();
+        if (is_control_message) {
+            wire_image_[length_field + 1] =
+                static_cast<uint8_t>(writer.length() - length_field - 2);
+        }
+
+
+
         let mut i = 0;
         while reader.has_remaining() {
             if i >= varints.len()
                 || varints[{
-                    i += 1;
-                    i - 1
-                }] == b'-'
+                i += 1;
+                i - 1
+            }] == b'-'
             {
                 writer.put_u8(reader.get_u8());
                 continue;
@@ -149,30 +193,30 @@ impl TestMessage {
 }
 
 pub(crate) fn create_test_message(
-    message_type: MessageType,
+    message_type: MoqtMessageType,
     uses_web_transport: bool,
 ) -> Box<dyn TestMessageBase> {
     match message_type {
-        MessageType::ObjectStream => Box::new(TestObjectStreamMessage::new()),
-        MessageType::ObjectDatagram => Box::new(TestObjectDatagramMessage::new()),
-        MessageType::SubscribeUpdate => Box::new(TestSubscribeUpdateMessage::new()),
-        MessageType::Subscribe => Box::new(TestSubscribeMessage::new()),
-        MessageType::SubscribeOk => Box::new(TestSubscribeOkMessage::new()),
-        MessageType::SubscribeError => Box::new(TestSubscribeErrorMessage::new()),
-        MessageType::Announce => Box::new(TestAnnounceMessage::new()),
-        MessageType::AnnounceOk => Box::new(TestAnnounceOkMessage::new()),
-        MessageType::AnnounceError => Box::new(TestAnnounceErrorMessage::new()),
-        MessageType::UnAnnounce => Box::new(TestUnAnnounceMessage::new()),
-        MessageType::UnSubscribe => Box::new(TestUnSubscribeMessage::new()),
-        MessageType::SubscribeDone => Box::new(TestSubscribeDoneMessage::new()),
-        MessageType::AnnounceCancel => Box::new(TestAnnounceCancelMessage::new()),
-        MessageType::TrackStatusRequest => Box::new(TestTrackStatusRequestMessage::new()),
-        MessageType::TrackStatus => Box::new(TestTrackStatusMessage::new()),
-        MessageType::GoAway => Box::new(TestGoAwayMessage::new()),
-        MessageType::ClientSetup => Box::new(TestClientSetupMessage::new(uses_web_transport)),
-        MessageType::ServerSetup => Box::new(TestServerSetupMessage::new()),
-        MessageType::StreamHeaderTrack => Box::new(TestStreamHeaderTrackMessage::new()),
-        MessageType::StreamHeaderGroup => Box::new(TestStreamHeaderGroupMessage::new()),
+        MoqtMessageType::ObjectStream => Box::new(TestObjectStreamMessage::new()),
+        MoqtMessageType::ObjectDatagram => Box::new(TestObjectDatagramMessage::new()),
+        MoqtMessageType::SubscribeUpdate => Box::new(TestSubscribeUpdateMessage::new()),
+        MoqtMessageType::Subscribe => Box::new(TestSubscribeMessage::new()),
+        MoqtMessageType::SubscribeOk => Box::new(TestSubscribeOkMessage::new()),
+        MoqtMessageType::SubscribeError => Box::new(TestSubscribeErrorMessage::new()),
+        MoqtMessageType::Announce => Box::new(TestAnnounceMessage::new()),
+        MoqtMessageType::AnnounceOk => Box::new(TestAnnounceOkMessage::new()),
+        MoqtMessageType::AnnounceError => Box::new(TestAnnounceErrorMessage::new()),
+        MoqtMessageType::UnAnnounce => Box::new(TestUnAnnounceMessage::new()),
+        MoqtMessageType::UnSubscribe => Box::new(TestUnSubscribeMessage::new()),
+        MoqtMessageType::SubscribeDone => Box::new(TestSubscribeDoneMessage::new()),
+        MoqtMessageType::AnnounceCancel => Box::new(TestAnnounceCancelMessage::new()),
+        MoqtMessageType::TrackStatusRequest => Box::new(TestTrackStatusRequestMessage::new()),
+        MoqtMessageType::TrackStatus => Box::new(TestTrackStatusMessage::new()),
+        MoqtMessageType::GoAway => Box::new(TestGoAwayMessage::new()),
+        MoqtMessageType::ClientSetup => Box::new(TestClientSetupMessage::new(uses_web_transport)),
+        MoqtMessageType::ServerSetup => Box::new(TestServerSetupMessage::new()),
+        MoqtMessageType::StreamHeaderTrack => Box::new(TestStreamHeaderTrackMessage::new()),
+        MoqtMessageType::StreamHeaderGroup => Box::new(TestStreamHeaderGroupMessage::new()),
     }
 }
 
@@ -183,7 +227,7 @@ pub(crate) struct TestObjectMessage {
 }
 
 impl TestObjectMessage {
-    fn new(message_type: MessageType) -> Self {
+    fn new(message_type: MoqtMessageType) -> Self {
         Self {
             base: TestMessage::new(message_type),
             object_header: ObjectHeader {
@@ -271,7 +315,7 @@ pub(crate) struct TestObjectStreamMessage {
 
 impl TestObjectStreamMessage {
     pub(crate) fn new() -> Self {
-        let mut base = TestObjectMessage::new(MessageType::ObjectStream);
+        let mut base = TestObjectMessage::new(MoqtMessageType::ObjectStream);
         let raw_packet = vec![
             0x00, 0x03, 0x04, 0x05, 0x06, 0x07, 0x00, // varints
             0x66, 0x6f, 0x6f, // payload = "foo"
@@ -320,7 +364,7 @@ pub(crate) struct TestObjectDatagramMessage {
 
 impl TestObjectDatagramMessage {
     pub(crate) fn new() -> Self {
-        let mut base = TestObjectMessage::new(MessageType::ObjectDatagram);
+        let mut base = TestObjectMessage::new(MoqtMessageType::ObjectDatagram);
         let raw_packet = vec![
             0x01, 0x03, 0x04, 0x05, 0x06, 0x07, 0x00, // varints
             0x66, 0x6f, 0x6f, // payload = "foo"
@@ -371,7 +415,7 @@ pub(crate) struct TestStreamHeaderTrackMessage {
 
 impl TestStreamHeaderTrackMessage {
     pub(crate) fn new() -> Self {
-        let mut base = TestObjectMessage::new(MessageType::StreamHeaderTrack);
+        let mut base = TestObjectMessage::new(MoqtMessageType::StreamHeaderTrack);
         // Some tests check that a FIN sent at the halfway point of a message results
         // in an error. Without the unnecessary expanded varint 0x0405, the halfway
         // point falls at the end of the Stream Header, which is legal. Expand the
@@ -428,7 +472,7 @@ pub(crate) struct TestStreamMiddlerTrackMessage {
 
 impl TestStreamMiddlerTrackMessage {
     pub(crate) fn new() -> Self {
-        let mut base = TestObjectMessage::new(MessageType::StreamHeaderTrack);
+        let mut base = TestObjectMessage::new(MoqtMessageType::StreamHeaderTrack);
         let raw_packet = vec![
             0x09, 0x0a, // object middler
             0x03, 0x62, 0x61, 0x72, // payload = "bar"
@@ -481,7 +525,7 @@ pub(crate) struct TestStreamHeaderGroupMessage {
 
 impl TestStreamHeaderGroupMessage {
     pub(crate) fn new() -> Self {
-        let mut base = TestObjectMessage::new(MessageType::StreamHeaderGroup);
+        let mut base = TestObjectMessage::new(MoqtMessageType::StreamHeaderGroup);
         let raw_packet = vec![
             0x40, 0x51, // two-byte type field
             0x03, 0x04, 0x05, 0x07, // varints
@@ -533,7 +577,7 @@ pub(crate) struct TestStreamMiddlerGroupMessage {
 
 impl TestStreamMiddlerGroupMessage {
     pub(crate) fn new() -> Self {
-        let mut base = TestObjectMessage::new(MessageType::StreamHeaderGroup);
+        let mut base = TestObjectMessage::new(MoqtMessageType::StreamHeaderGroup);
         let raw_packet = vec![
             0x09, 0x03, 0x62, 0x61, 0x72, // object middler; payload = "bar"
         ];
@@ -585,7 +629,7 @@ pub(crate) struct TestClientSetupMessage {
 
 impl TestClientSetupMessage {
     pub(crate) fn new(webtrans: bool) -> Self {
-        let mut base = TestMessage::new(MessageType::ClientSetup);
+        let mut base = TestMessage::new(MoqtMessageType::ClientSetup);
         let mut client_setup = ClientSetup {
             supported_versions: vec![Version::Unsupported(0x01), Version::Unsupported(0x02)],
             role: Some(Role::PubSub),
@@ -682,7 +726,7 @@ pub(crate) struct TestServerSetupMessage {
 
 impl TestServerSetupMessage {
     pub(crate) fn new() -> Self {
-        let mut base = TestMessage::new(MessageType::ServerSetup);
+        let mut base = TestMessage::new(MoqtMessageType::ServerSetup);
         let server_setup = ServerSetup {
             supported_version: Version::Unsupported(0x01),
             role: Some(Role::PubSub),
@@ -754,7 +798,7 @@ pub(crate) struct TestSubscribeMessage {
 
 impl TestSubscribeMessage {
     pub(crate) fn new() -> Self {
-        let mut base = TestMessage::new(MessageType::Subscribe);
+        let mut base = TestMessage::new(MoqtMessageType::Subscribe);
         let subscribe = Subscribe {
             subscribe_id: 1,
             track_alias: 2,
@@ -850,7 +894,7 @@ pub(crate) struct TestSubscribeOkMessage {
 
 impl TestSubscribeOkMessage {
     pub(crate) fn new() -> Self {
-        let mut base = TestMessage::new(MessageType::SubscribeOk);
+        let mut base = TestMessage::new(MoqtMessageType::SubscribeOk);
         let subscribe_ok = SubscribeOk {
             subscribe_id: 1,
             expires: 3,
@@ -936,7 +980,7 @@ pub(crate) struct TestSubscribeErrorMessage {
 
 impl TestSubscribeErrorMessage {
     pub(crate) fn new() -> Self {
-        let mut base = TestMessage::new(MessageType::SubscribeError);
+        let mut base = TestMessage::new(MoqtMessageType::SubscribeError);
         let subscribe_error = SubscribeError {
             subscribe_id: 2,
             error_code: SubscribeErrorCode::InvalidRange as u64,
@@ -1017,7 +1061,7 @@ pub(crate) struct TestUnSubscribeMessage {
 
 impl TestUnSubscribeMessage {
     pub(crate) fn new() -> Self {
-        let mut base = TestMessage::new(MessageType::UnSubscribe);
+        let mut base = TestMessage::new(MoqtMessageType::UnSubscribe);
         let un_subscribe = UnSubscribe { subscribe_id: 3 };
         let raw_packet = vec![
             0x0a, 0x03, // subscribe_id = 3
@@ -1081,7 +1125,7 @@ pub(crate) struct TestSubscribeDoneMessage {
 
 impl TestSubscribeDoneMessage {
     pub(crate) fn new() -> Self {
-        let mut base = TestMessage::new(MessageType::SubscribeDone);
+        let mut base = TestMessage::new(MoqtMessageType::SubscribeDone);
         let subscribe_done = SubscribeDone {
             subscribe_id: 2,
             status_code: 3,
@@ -1172,7 +1216,7 @@ pub(crate) struct TestSubscribeUpdateMessage {
 
 impl TestSubscribeUpdateMessage {
     pub(crate) fn new() -> Self {
-        let mut base = TestMessage::new(MessageType::SubscribeUpdate);
+        let mut base = TestMessage::new(MoqtMessageType::SubscribeUpdate);
         let subscribe_update = SubscribeUpdate {
             subscribe_id: 2,
             start_group_object: FullSequence {
@@ -1260,7 +1304,7 @@ pub(crate) struct TestAnnounceMessage {
 
 impl TestAnnounceMessage {
     pub(crate) fn new() -> Self {
-        let mut base = TestMessage::new(MessageType::Announce);
+        let mut base = TestMessage::new(MoqtMessageType::Announce);
         let announce = Announce {
             track_namespace: "foo".to_string(),
             authorization_info: Some("bar".to_string()),
@@ -1331,7 +1375,7 @@ pub(crate) struct TestAnnounceOkMessage {
 
 impl TestAnnounceOkMessage {
     pub(crate) fn new() -> Self {
-        let mut base = TestMessage::new(MessageType::AnnounceOk);
+        let mut base = TestMessage::new(MoqtMessageType::AnnounceOk);
         let announce_ok = AnnounceOk {
             track_namespace: "foo".to_string(),
         };
@@ -1397,7 +1441,7 @@ pub(crate) struct TestAnnounceErrorMessage {
 
 impl TestAnnounceErrorMessage {
     pub(crate) fn new() -> Self {
-        let mut base = TestMessage::new(MessageType::AnnounceError);
+        let mut base = TestMessage::new(MoqtMessageType::AnnounceError);
         let announce_error = AnnounceError {
             track_namespace: "foo".to_string(),
             error_code: 1,
@@ -1473,7 +1517,7 @@ pub(crate) struct TestAnnounceCancelMessage {
 
 impl TestAnnounceCancelMessage {
     pub(crate) fn new() -> Self {
-        let mut base = TestMessage::new(MessageType::AnnounceCancel);
+        let mut base = TestMessage::new(MoqtMessageType::AnnounceCancel);
         let announce_cancel = AnnounceCancel {
             track_namespace: "foo".to_string(),
         };
@@ -1539,7 +1583,7 @@ pub(crate) struct TestUnAnnounceMessage {
 
 impl TestUnAnnounceMessage {
     pub(crate) fn new() -> Self {
-        let mut base = TestMessage::new(MessageType::UnAnnounce);
+        let mut base = TestMessage::new(MoqtMessageType::UnAnnounce);
         let un_announce = UnAnnounce {
             track_namespace: "foo".to_string(),
         };
@@ -1605,7 +1649,7 @@ pub(crate) struct TestTrackStatusRequestMessage {
 
 impl TestTrackStatusRequestMessage {
     pub(crate) fn new() -> Self {
-        let mut base = TestMessage::new(MessageType::TrackStatusRequest);
+        let mut base = TestMessage::new(MoqtMessageType::TrackStatusRequest);
         let track_status_request = TrackStatusRequest {
             track_namespace: "foo".to_string(),
             track_name: "abcd".to_string(),
@@ -1679,7 +1723,7 @@ pub(crate) struct TestTrackStatusMessage {
 
 impl TestTrackStatusMessage {
     pub(crate) fn new() -> Self {
-        let mut base = TestMessage::new(MessageType::TrackStatus);
+        let mut base = TestMessage::new(MoqtMessageType::TrackStatus);
         let track_status = TrackStatus {
             track_namespace: "foo".to_string(),
             track_name: "abcd".to_string(),
@@ -1762,7 +1806,7 @@ pub(crate) struct TestGoAwayMessage {
 
 impl TestGoAwayMessage {
     pub(crate) fn new() -> Self {
-        let mut base = TestMessage::new(MessageType::GoAway);
+        let mut base = TestMessage::new(MoqtMessageType::GoAway);
         let go_away = GoAway {
             new_session_uri: "foo".to_string(),
         };
