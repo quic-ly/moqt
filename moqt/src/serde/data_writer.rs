@@ -1,4 +1,4 @@
-use bytes::BufMut;
+use bytes::{BufMut, Bytes, BytesMut};
 use log::error;
 
 /// Maximum value that can be properly encoded using RFC 9000 62-bit Variable
@@ -44,13 +44,13 @@ pub const kDefaultLongHeaderLengthLength: VariableLengthIntegerLength =
 /// to a frame instance.  The internal memory buffer is exposed as the "data"
 /// of the DataWriter.
 pub struct DataWriter<'a> {
-    buffer: &'a mut dyn BufMut,
+    buffer: &'a mut BytesMut,
 }
 
 impl<'a> DataWriter<'a> {
     // Creates a DataWriter where |buffer| is not owned
     // using NETWORK_BYTE_ORDER endianness.
-    pub fn new(buffer: &'a mut dyn BufMut) -> Self {
+    pub fn new(buffer: &'a mut BytesMut) -> Self {
         Self { buffer }
     }
 
@@ -98,12 +98,12 @@ impl<'a> DataWriter<'a> {
             return false;
         }
 
-        let be_bytes = value.to_be_bytes();
-        self.write_bytes(&be_bytes[8 - num_bytes..])
+        let be_bytes = Bytes::copy_from_slice(&value.to_be_bytes()[8 - num_bytes..]);
+        self.write_bytes(be_bytes)
     }
 
     pub fn write_string_piece(&mut self, val: &str) -> bool {
-        self.write_bytes(val.as_bytes())
+        self.write_bytes(Bytes::copy_from_slice(val.as_bytes()))
     }
 
     pub fn write_string_piece16(&mut self, val: &str) -> bool {
@@ -113,15 +113,15 @@ impl<'a> DataWriter<'a> {
         if !self.write_uint16(val.len() as u16) {
             return false;
         }
-        self.write_bytes(val.as_bytes())
+        self.write_bytes(Bytes::copy_from_slice(val.as_bytes()))
     }
 
-    pub fn write_bytes(&mut self, data: &[u8]) -> bool {
+    pub fn write_bytes(&mut self, data: Bytes) -> bool {
         let remaining_bytes = self.buffer.remaining_mut();
         if remaining_bytes < data.len() {
             return false;
         }
-        self.buffer.put_slice(data);
+        self.buffer.put(&mut data.clone());
         true
     }
 
@@ -270,7 +270,9 @@ impl<'a> DataWriter<'a> {
         if !self.write_var_int62(string_piece.len() as u64) {
             return false;
         }
-        if !string_piece.is_empty() && !self.write_bytes(string_piece.as_bytes()) {
+        if !string_piece.is_empty()
+            && !self.write_bytes(Bytes::copy_from_slice(string_piece.as_bytes()))
+        {
             return false;
         }
         true

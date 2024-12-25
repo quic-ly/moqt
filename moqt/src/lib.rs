@@ -8,6 +8,5 @@ pub mod quic_types;
 pub mod serde;
 pub mod webtransport;
 
-/// match between client and server perspective, since there may be a proxy
-/// between them.
-pub type StreamId = u32;
+#[cfg(test)]
+pub(crate) mod tests;

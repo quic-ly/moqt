@@ -22,6 +22,10 @@ mod remote_track;
 mod stream;
 mod subscribe_window;
 
+/// match between client and server perspective, since there may be a proxy
+/// between them.
+pub type StreamId = u32;
+
 // If |error_message| is none, the ANNOUNCE was successful.
 pub type OutgoingAnnounceCallback = fn(track_namespace: String, error: Option<AnnounceErrorReason>);
 

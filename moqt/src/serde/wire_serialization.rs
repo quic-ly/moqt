@@ -1,5 +1,6 @@
 use crate::moqt_messages::MoqtVersion;
 use crate::serde::data_writer::DataWriter;
+use bytes::Bytes;
 use log::error;
 use std::marker::PhantomData;
 
@@ -51,9 +52,9 @@ where
     }
 
     fn serialize_into_writer(&self, writer: &mut DataWriter<'_>) -> bool {
-        let value_size = std::mem::size_of::<T>();
+        let value_size = size_of::<T>();
         let value_as_u64: u64 = self.value().into();
-        let value_bytes = &value_as_u64.to_be_bytes()[8 - value_size..]; // Take only the relevant bytes
+        let value_bytes = Bytes::copy_from_slice(&value_as_u64.to_be_bytes()[8 - value_size..]); // Take only the relevant bytes
         writer.write_bytes(value_bytes);
         true
     }
@@ -122,13 +123,13 @@ impl RefWireType<'_, MoqtVersion> for WireVarInt62 {
 }
 
 /// Represents unframed raw string.
-pub struct WireBytes<'a>(pub &'a [u8]);
+pub struct WireBytes<'a>(pub &'a Bytes);
 impl WireType for WireBytes<'_> {
     fn get_length_on_wire(&self) -> usize {
         self.0.len()
     }
     fn serialize_into_writer(&self, writer: &mut DataWriter<'_>) -> bool {
-        writer.write_bytes(self.0)
+        writer.write_bytes(self.0.clone())
     }
 }
 
