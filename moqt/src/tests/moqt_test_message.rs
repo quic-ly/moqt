@@ -1,7 +1,8 @@
-use bytes::{Buf, BufMut, BytesMut};
-use std::ops::{Deref, DerefMut};
 use crate::moqt_messages::{kMaxMessageHeaderSize, MoqtMessageType};
+use crate::serde::data_reader::DataReader;
 use crate::serde::data_writer::DataWriter;
+use bytes::BytesMut;
+use std::io::Error;
 
 pub(crate) enum MessageStructuredData {
     MoqtClientSetup,
@@ -88,13 +89,11 @@ impl TestMessage {
 
     // This will cause a parsing error. Do not call this on Object Messages.
     fn decrease_payload_length_by_one(&mut self) {
-        let length_offset =
-            0x1usize << ((self.wire_image[0] & 0xc0) >> 6);
+        let length_offset = 0x1usize << ((self.wire_image[0] & 0xc0) >> 6);
         self.wire_image[length_offset] -= 1;
     }
     fn increase_payload_length_by_one(&mut self) {
-        let length_offset =
-            0x1usize << ((self.wire_image[0] & 0xc0) >> 6);
+        let length_offset = 0x1usize << ((self.wire_image[0] & 0xc0) >> 6);
         self.wire_image[length_offset] += 1;
         self.set_wire_image_size(self.wire_image_size + 1);
     }
@@ -104,10 +103,15 @@ impl TestMessage {
     // Each character in |varints| corresponds to a byte in the original message.
     // If there is a 'v', it is a varint that should be expanded. If '-', skip
     // to the next byte.
-    fn expand_varints_impl(&mut self, varints: &[u8], is_control_message: bool) -> bool {
+    fn expand_varints_impl(
+        &mut self,
+        varints: &[u8],
+        is_control_message: bool,
+    ) -> Result<(), Error> {
         let mut next_varint_len = 2;
         let mut new_wire_image = BytesMut::with_capacity(kMaxMessageHeaderSize + 1);
-        let mut reader = &self.wire_image[..self.wire_image_size];
+        let mut wire_image_slice = &self.wire_image[..self.wire_image_size];
+        let mut reader = DataReader::new(&mut wire_image_slice);
         let mut writer = DataWriter::new(&mut new_wire_image);
         let mut i = 0;
         let mut length_field = 0;
@@ -115,83 +119,53 @@ impl TestMessage {
             // the length will be a 16-bit varint.
             let mut nonvarint_type = false;
             while varints[i] == b'-' {
-                i+=1;
+                i += 1;
                 nonvarint_type = true;
-                writer.write_uint8(reader.get_u8());
+                writer.write_uint8(reader.read_uint8()?)?;
             }
-            let mut value: u64;
             if !nonvarint_type {
-                i+=1;
-                reader.ReadVarInt62(&value);
-                writer.WriteVarInt62WithForcedLength(
-                    value, static_cast<quiche::QuicheVariableLengthIntegerLength>(
-                        next_varint_len));
+                i += 1;
+                let value = reader.read_var_int62()?;
+                writer.write_var_int62_with_forced_length(value, next_varint_len)?;
                 next_varint_len *= 2;
-                if (next_varint_len == 16) {
+                if next_varint_len == 16 {
                     next_varint_len = 2;
                 }
             }
-            reader.ReadVarInt62(&value);
-            ++i;
+            let value = reader.read_var_int62()?;
+            i += 1;
             length_field = writer.length();
             // Write in current length as a 2B placeholder.
-            writer.WriteVarInt62WithForcedLength(
-                value, static_cast<quiche::QuicheVariableLengthIntegerLength>(2));
+            writer.write_var_int62_with_forced_length(value, 2)?;
         }
-        while (!reader.IsDoneReading()) {
-            if (i >= varints.length() || varints[i++] == '-') {
-                uint8_t byte;
-                reader.ReadUInt8(&byte);
-                writer.WriteUInt8(byte);
+        while reader.can_read(1) {
+            if i >= varints.len() || varints[i] == b'-' {
+                if i < varints.len() {
+                    i += 1;
+                }
+                let byte = reader.read_uint8()?;
+                writer.write_uint8(byte)?;
                 continue;
             }
-            uint64_t value;
-            reader.ReadVarInt62(&value);
-            writer.WriteVarInt62WithForcedLength(
-                value, static_cast<quiche::QuicheVariableLengthIntegerLength>(
-                    next_varint_len));
-            next_varint_len *= 2;
-            if (next_varint_len == 16) {
-                next_varint_len = 2;
-            }
-        }
-        memcpy(wire_image_, new_wire_image, writer.length());
-        wire_image_size_ = writer.length();
-        if (is_control_message) {
-            wire_image_[length_field + 1] =
-                static_cast<uint8_t>(writer.length() - length_field - 2);
-        }
-
-
-
-        let mut i = 0;
-        while reader.has_remaining() {
-            if i >= varints.len()
-                || varints[{
-                i += 1;
-                i - 1
-            }] == b'-'
-            {
-                writer.put_u8(reader.get_u8());
-                continue;
-            }
-            let (value, _) = u64::deserialize(&mut reader)?;
-            let _ = TestMessage::write_var_int62with_forced_length(
-                value,
-                &mut writer,
-                next_varint_len,
-            )?;
+            let value = reader.read_var_int62()?;
+            writer.write_var_int62_with_forced_length(value, next_varint_len)?;
             next_varint_len *= 2;
             if next_varint_len == 16 {
                 next_varint_len = 2;
             }
         }
-        self.wire_image[0..writer.len()].copy_from_slice(&writer[..]);
-        self.wire_image_size = writer.len();
+
+        let writer_length = writer.length();
+        self.wire_image[..writer_length].copy_from_slice(&new_wire_image[..writer_length]);
+        self.wire_image_size = writer_length;
+        if is_control_message {
+            self.wire_image[length_field + 1] = (writer_length - length_field - 2) as u8;
+        }
+
         Ok(())
     }
 }
-
+/*
 pub(crate) fn create_test_message(
     message_type: MoqtMessageType,
     uses_web_transport: bool,
@@ -1860,3 +1834,4 @@ impl TestMessageBase for TestGoAwayMessage {
         self.expand_varints_impl("vv---".as_bytes())
     }
 }
+*/

@@ -1,5 +1,6 @@
 use bytes::BufMut;
 use log::error;
+use std::io::{Error, ErrorKind};
 
 /// Maximum value that can be properly encoded using RFC 9000 62-bit Variable
 /// Length Integer encoding.
@@ -45,13 +46,14 @@ pub const kDefaultLongHeaderLengthLength: VariableLengthIntegerLength =
 /// of the DataWriter.
 pub struct DataWriter<'a> {
     buffer: &'a mut dyn BufMut,
+    length: usize,
 }
 
 impl<'a> DataWriter<'a> {
     // Creates a DataWriter where |buffer| is not owned
     // using NETWORK_BYTE_ORDER endianness.
     pub fn new(buffer: &'a mut dyn BufMut) -> Self {
-        Self { buffer }
+        Self { buffer, length: 0 }
     }
 
     // Returns the size of the DataWriter's data.
@@ -59,90 +61,98 @@ impl<'a> DataWriter<'a> {
         self.buffer.remaining_mut()
     }
 
+    pub fn length(&self) -> usize {
+        self.length
+    }
+
     // Methods for adding to the payload.  These values are appended to the end
     // of the DataWriter payload.
 
     // Writes 8/16/32/64-bit unsigned integers.
-    pub fn write_uint8(&mut self, value: u8) -> bool {
+    pub fn write_uint8(&mut self, value: u8) -> Result<(), Error> {
         if self.remaining() < 1 {
-            return false;
+            return Err(Error::from(ErrorKind::UnexpectedEof));
         }
         self.buffer.put_u8(value);
-        true
+        self.length += 1;
+        Ok(())
     }
-    pub fn write_uint16(&mut self, value: u16) -> bool {
+    pub fn write_uint16(&mut self, value: u16) -> Result<(), Error> {
         if self.remaining() < 2 {
-            return false;
+            return Err(Error::from(ErrorKind::UnexpectedEof));
         }
         self.buffer.put_u16(value);
-        true
+        self.length += 2;
+        Ok(())
     }
-    pub fn write_uint32(&mut self, value: u32) -> bool {
+    pub fn write_uint32(&mut self, value: u32) -> Result<(), Error> {
         if self.remaining() < 4 {
-            return false;
+            return Err(Error::from(ErrorKind::UnexpectedEof));
         }
         self.buffer.put_u32(value);
-        true
+        self.length += 4;
+        Ok(())
     }
-    pub fn write_uint64(&mut self, value: u64) -> bool {
+    pub fn write_uint64(&mut self, value: u64) -> Result<(), Error> {
         if self.remaining() < 8 {
-            return false;
+            return Err(Error::from(ErrorKind::UnexpectedEof));
         }
         self.buffer.put_u64(value);
-        true
+        self.length += 8;
+        Ok(())
     }
 
     // Writes least significant |num_bytes| of a 64-bit unsigned integer
-    pub fn write_bytes_to_uint64(&mut self, num_bytes: usize, value: u64) -> bool {
+    pub fn write_bytes_to_uint64(&mut self, num_bytes: usize, value: u64) -> Result<(), Error> {
         if num_bytes > 8 {
-            return false;
+            return Err(Error::from(ErrorKind::InvalidInput));
         }
 
         let be_bytes = &value.to_be_bytes()[8 - num_bytes..];
         self.write_bytes(be_bytes)
     }
 
-    pub fn write_string_piece(&mut self, val: &str) -> bool {
+    pub fn write_string_piece(&mut self, val: &str) -> Result<(), Error> {
         self.write_bytes(val.as_bytes())
     }
 
-    pub fn write_string_piece16(&mut self, val: &str) -> bool {
+    pub fn write_string_piece16(&mut self, val: &str) -> Result<(), Error> {
         if val.len() > u16::MAX as usize {
-            return false;
+            return Err(Error::from(ErrorKind::InvalidInput));
         }
-        if !self.write_uint16(val.len() as u16) {
-            return false;
-        }
+        self.write_uint16(val.len() as u16)?;
         self.write_bytes(val.as_bytes())
     }
 
-    pub fn write_bytes(&mut self, data: &[u8]) -> bool {
+    pub fn write_bytes(&mut self, data: &[u8]) -> Result<(), Error> {
         let remaining_bytes = self.buffer.remaining_mut();
         if remaining_bytes < data.len() {
-            return false;
+            return Err(Error::from(ErrorKind::UnexpectedEof));
         }
         self.buffer.put_slice(data);
-        true
+        self.length += data.len();
+        Ok(())
     }
 
-    pub fn write_repeated_byte(&mut self, byte: u8, count: usize) -> bool {
+    pub fn write_repeated_byte(&mut self, byte: u8, count: usize) -> Result<(), Error> {
         if self.remaining() < count {
-            return false;
+            return Err(Error::from(ErrorKind::UnexpectedEof));
         }
         for _ in 0..count {
             self.buffer.put_u8(byte);
         }
-        true
+        self.length += count;
+        Ok(())
     }
     // Fills the remaining buffer with null characters.
-    pub fn write_padding(&mut self) -> bool {
+    pub fn write_padding(&mut self) -> Result<(), Error> {
         if self.remaining() == usize::MAX {
-            return false;
+            return Err(Error::from(ErrorKind::InvalidData));
         }
         self.write_repeated_byte(0x00, self.remaining())
     }
     // Write padding of |count| bytes.
-    pub fn write_padding_bytes(&mut self, count: usize) -> bool {
+    pub fn write_padding_bytes(&mut self, count: usize) -> Result<(), Error> {
         self.write_repeated_byte(0x00, count)
     }
 
@@ -150,14 +160,14 @@ impl<'a> DataWriter<'a> {
     // converted to big endian (e.g., CHLO is 'C','H','L','O') in memory by TAG or
     // MakeQuicTag and tags are written in byte order, so tags on the wire are
     // in big endian.
-    pub fn write_tag(&mut self, tag: u32) -> bool {
+    pub fn write_tag(&mut self, tag: u32) -> Result<(), Error> {
         self.write_uint32(tag)
     }
 
     /// Write a 62-bit unsigned integer using RFC 9000 Variable Length Integer
     /// encoding. Returns false if the value is out of range or if there is no room
     /// in the buffer.
-    pub fn write_var_int62(&mut self, value: u64) -> bool {
+    pub fn write_var_int62(&mut self, value: u64) -> Result<(), Error> {
         let remaining_bytes = self.buffer.remaining_mut();
 
         if (value & kVarInt62ErrorMask) == 0 {
@@ -175,9 +185,10 @@ impl<'a> DataWriter<'a> {
                     self.buffer.put_u8(((value >> 16) & 0xff) as u8);
                     self.buffer.put_u8(((value >> 8) & 0xff) as u8);
                     self.buffer.put_u8((value & 0xff) as u8);
-                    return true;
+                    self.length += 8;
+                    return Ok(());
                 }
-                return false;
+                return Err(Error::from(ErrorKind::UnexpectedEof));
             }
             // The high-order-4 bytes are all 0, check for a 1, 2, or 4-byte
             // encoding
@@ -189,9 +200,10 @@ impl<'a> DataWriter<'a> {
                     self.buffer.put_u8(((value >> 16) & 0xff) as u8);
                     self.buffer.put_u8(((value >> 8) & 0xff) as u8);
                     self.buffer.put_u8((value & 0xff) as u8);
-                    return true;
+                    self.length += 4;
+                    return Ok(());
                 }
-                return false;
+                return Err(Error::from(ErrorKind::UnexpectedEof));
             }
             // The high-order bits are all 0. Check to see if the number
             // can be encoded as one or two bytes. One byte encoding has
@@ -204,19 +216,21 @@ impl<'a> DataWriter<'a> {
                 if remaining_bytes >= 2 {
                     self.buffer.put_u8(((value >> 8) & 0x3f) as u8 + 0x40);
                     self.buffer.put_u8((value & 0xff) as u8);
-                    return true;
+                    self.length += 2;
+                    return Ok(());
                 }
-                return false;
+                return Err(Error::from(ErrorKind::UnexpectedEof));
             }
             if remaining_bytes >= 1 {
                 // Do 1-byte encoding
                 self.buffer.put_u8((value & 0x3f) as u8);
-                return true;
+                self.length += 1;
+                return Ok(());
             }
-            return false;
+            return Err(Error::from(ErrorKind::UnexpectedEof));
         }
         // Can not encode, high 2 bits not 0
-        false
+        Err(Error::from(ErrorKind::UnexpectedEof))
     }
 
     // Same as write_var_int62(uint64_t), but forces an encoding size to write to.
@@ -226,54 +240,54 @@ impl<'a> DataWriter<'a> {
     pub fn write_var_int62_with_forced_length(
         &mut self,
         value: u64,
-        write_length: VariableLengthIntegerLength,
-    ) -> bool {
+        write_length: usize,
+    ) -> Result<(), Error> {
         let remaining_bytes = self.buffer.remaining_mut();
-        if remaining_bytes < write_length as usize {
-            return false;
+        if remaining_bytes < write_length {
+            return Err(Error::from(ErrorKind::UnexpectedEof));
         }
 
-        let min_length = DataWriter::get_var_int62_len(value);
+        let min_length = DataWriter::get_var_int62_len(value) as usize;
         if write_length < min_length {
             error!(
                 "Cannot write value {} with write_length {}",
                 value as u8, write_length as u8
             );
-            return false;
+            Err(Error::from(ErrorKind::UnexpectedEof))
+        } else if write_length == min_length {
+            self.write_var_int62(value)
+        } else if write_length
+            == VariableLengthIntegerLength::VARIABLE_LENGTH_INTEGER_LENGTH_2 as usize
+        {
+            self.write_uint8(0b01000000)?;
+            self.write_uint8(value as u8)
+        } else if write_length
+            == VariableLengthIntegerLength::VARIABLE_LENGTH_INTEGER_LENGTH_4 as usize
+        {
+            self.write_uint8(0b10000000)?;
+            self.write_uint8(0)?;
+            self.write_uint16(value as u16)
+        } else if write_length
+            == VariableLengthIntegerLength::VARIABLE_LENGTH_INTEGER_LENGTH_8 as usize
+        {
+            self.write_uint8(0b11000000)?;
+            self.write_uint8(0)?;
+            self.write_uint16(0)?;
+            self.write_uint32(value as u32)
+        } else {
+            error!("Invalid write_length {}", write_length as u8);
+            Err(Error::from(ErrorKind::UnexpectedEof))
         }
-        if write_length == min_length {
-            return self.write_var_int62(value);
-        }
-
-        if write_length == VariableLengthIntegerLength::VARIABLE_LENGTH_INTEGER_LENGTH_2 {
-            return self.write_uint8(0b01000000) && self.write_uint8(value as u8);
-        }
-        if write_length == VariableLengthIntegerLength::VARIABLE_LENGTH_INTEGER_LENGTH_4 {
-            return self.write_uint8(0b10000000)
-                && self.write_uint8(0)
-                && self.write_uint16(value as u16);
-        }
-        if write_length == VariableLengthIntegerLength::VARIABLE_LENGTH_INTEGER_LENGTH_8 {
-            return self.write_uint8(0b11000000)
-                && self.write_uint8(0)
-                && self.write_uint16(0)
-                && self.write_uint32(value as u32);
-        }
-
-        error!("Invalid write_length {}", write_length as u8);
-        false
     }
 
     // Writes a string piece as a consecutive length/content pair. The
     // length uses RFC 9000 Variable Length Integer encoding.
-    pub fn write_string_piece_var_int62(&mut self, string_piece: &str) -> bool {
-        if !self.write_var_int62(string_piece.len() as u64) {
-            return false;
+    pub fn write_string_piece_var_int62(&mut self, string_piece: &str) -> Result<(), Error> {
+        self.write_var_int62(string_piece.len() as u64)?;
+        if !string_piece.is_empty() {
+            self.write_bytes(string_piece.as_bytes())?;
         }
-        if !string_piece.is_empty() && !self.write_bytes(string_piece.as_bytes()) {
-            return false;
-        }
-        true
+        Ok(())
     }
 
     /// Utility function to return the number of bytes needed to encode

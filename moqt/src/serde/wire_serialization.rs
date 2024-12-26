@@ -1,12 +1,12 @@
 use crate::moqt_messages::MoqtVersion;
 use crate::serde::data_writer::DataWriter;
 use bytes::Bytes;
-use log::error;
+use std::io::Error;
 use std::marker::PhantomData;
 
 pub trait WireType {
     fn get_length_on_wire(&self) -> usize;
-    fn serialize_into_writer(&self, writer: &mut DataWriter<'_>) -> bool;
+    fn serialize_into_writer(&self, writer: &mut DataWriter<'_>) -> Result<(), Error>;
 }
 
 pub trait LengthWireType: WireType {
@@ -51,12 +51,11 @@ where
         std::mem::size_of::<T>()
     }
 
-    fn serialize_into_writer(&self, writer: &mut DataWriter<'_>) -> bool {
+    fn serialize_into_writer(&self, writer: &mut DataWriter<'_>) -> Result<(), Error> {
         let value_size = size_of::<T>();
         let value_as_u64: u64 = self.value().into();
         let value_bytes = &value_as_u64.to_be_bytes()[8 - value_size..]; // Take only the relevant bytes
-        writer.write_bytes(value_bytes);
-        true
+        writer.write_bytes(value_bytes)
     }
 }
 
@@ -83,7 +82,7 @@ macro_rules! impl_wire_fixed_size_int {
                 self.0.get_length_on_wire()
             }
 
-            fn serialize_into_writer(&self, writer: &mut DataWriter<'_>) -> bool {
+            fn serialize_into_writer(&self, writer: &mut DataWriter<'_>) -> Result<(), Error> {
                 self.0.serialize_into_writer(writer)
             }
         }
@@ -105,7 +104,7 @@ impl WireType for WireVarInt62 {
     fn get_length_on_wire(&self) -> usize {
         DataWriter::get_var_int62_len(self.0) as usize
     }
-    fn serialize_into_writer(&self, writer: &mut DataWriter<'_>) -> bool {
+    fn serialize_into_writer(&self, writer: &mut DataWriter<'_>) -> Result<(), Error> {
         writer.write_var_int62(self.0)
     }
 }
@@ -128,7 +127,7 @@ impl WireType for WireBytes<'_> {
     fn get_length_on_wire(&self) -> usize {
         self.0.len()
     }
-    fn serialize_into_writer(&self, writer: &mut DataWriter<'_>) -> bool {
+    fn serialize_into_writer(&self, writer: &mut DataWriter<'_>) -> Result<(), Error> {
         writer.write_bytes(self.0)
     }
 }
@@ -159,17 +158,10 @@ where
         let length_prefix = T::from_length(self.value.len());
         length_prefix.get_length_on_wire() + self.value.len()
     }
-    fn serialize_into_writer(&self, writer: &mut DataWriter<'_>) -> bool {
+    fn serialize_into_writer(&self, writer: &mut DataWriter<'_>) -> Result<(), Error> {
         let length_prefix = T::from_length(self.value.len());
-        if !length_prefix.serialize_into_writer(writer) {
-            error!("Failed to serialize the length prefix");
-            return false;
-        }
-        if !writer.write_string_piece(self.value) {
-            error!("Failed to serialize the string proper");
-            return false;
-        }
-        true
+        length_prefix.serialize_into_writer(writer)?;
+        writer.write_string_piece(self.value)
     }
 }
 
@@ -220,12 +212,12 @@ where
         }
     }
 
-    fn serialize_into_writer(&self, writer: &mut DataWriter<'_>) -> bool {
+    fn serialize_into_writer(&self, writer: &mut DataWriter<'_>) -> Result<(), Error> {
         if let Some(ref inner_value) = self.value {
             inner_value.serialize_into_writer(writer)
         } else {
             // Return the default "success" status if no value is present.
-            true
+            Ok(())
         }
     }
 }
@@ -259,14 +251,11 @@ where
         }
         total
     }
-    fn serialize_into_writer(&self, writer: &mut DataWriter<'_>) -> bool {
-        for (i, value) in self.value.iter().enumerate() {
-            if !W::from_ref(value).serialize_into_writer(writer) {
-                error!("Failed to serialize vector value #{}", i);
-                return false;
-            }
+    fn serialize_into_writer(&self, writer: &mut DataWriter<'_>) -> Result<(), Error> {
+        for value in self.value {
+            W::from_ref(value).serialize_into_writer(writer)?;
         }
-        true
+        Ok(())
     }
 }
 
@@ -290,18 +279,15 @@ macro_rules! compute_length_on_wire {
 macro_rules! serialize_into_writer {
     // Base case: no arguments
     ($writer:expr, $argno:expr) => {
-        true
+        Ok::<(), Error>(())
     };
 
     // Recursive case
     ($writer:expr, $argno:expr, $first:expr $(, $rest:expr)*) => {{
         // Serialize the first argument
-        if $first.serialize_into_writer($writer) {
-            // Continue with the rest of the arguments
-            serialize_into_writer!($writer, $argno + 1 $(, $rest)*)
-        } else {
-            false
-        }
+        $first.serialize_into_writer($writer)?;
+        // Continue with the rest of the arguments
+        serialize_into_writer!($writer, $argno + 1 $(, $rest)*)
     }};
 }
 
@@ -315,26 +301,23 @@ macro_rules! serialize_into_buffer {
     ($($data:expr),*) => {{
         let buffer_size = compute_length_on_wire!($($data),*);
         if buffer_size == 0 {
-            return BytesMut::new();
+            return Ok(BytesMut::new());
         }
 
         let mut buffer = BytesMut::with_capacity(buffer_size);
         let mut writer = DataWriter::new(&mut buffer);
 
-        if !serialize_into_writer!(&mut writer, 0 $(, $data)*) {
-            error!("Failed to serialize data");
-            return BytesMut::new();
-        }
+        serialize_into_writer!(&mut writer, 0 $(, $data)*)?;
 
         if buffer.len() != buffer_size {
             error!(
                 "Excess {} bytes allocated while serializing",
                 buffer_size - buffer.len()
             );
-            return BytesMut::new();
+            return Err(Error::from(ErrorKind::InvalidData));
         }
 
-        buffer
+        Ok(buffer)
     }};
 }
 
@@ -349,10 +332,7 @@ macro_rules! serialize_into_string {
         let mut buffer = BytesMut::with_capacity(buffer_size);
         let mut writer = DataWriter::new(&mut buffer);
 
-        if !serialize_into_writer!(&mut writer, 0 $(, $data)*) {
-            error!("Failed to serialize data");
-            return String::new();
-        }
+        serialize_into_writer!(&mut writer, 0 $(, $data)*)?;
 
         if buffer.len() != buffer_size {
             error!()(
