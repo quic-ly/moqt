@@ -505,7 +505,7 @@ impl MoqtFramer {
         }
         serialize_control_message!(
             MoqtMessageType::kServerSetup,
-            WireVarInt62(message.selected_version as u64),
+            WireVarInt62(message.selected_version),
             WireVarInt62(int_parameters.len() as u64),
             WireSpan::<WireIntParameter<'_>, IntParameter>::new(&int_parameters)
         )

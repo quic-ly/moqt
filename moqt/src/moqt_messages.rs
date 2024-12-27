@@ -5,22 +5,21 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::fmt::Display;
 use std::time::Duration;
+use thiserror::Error;
+
 /*TODO: inline constexpr quic::ParsedQuicVersionVector GetMoqtSupportedQuicVersions() {
    return quic::ParsedQuicVersionVector{quic::ParsedQuicVersion::RFCv1()}
 }
 */
 
-#[allow(non_camel_case_types)]
-#[derive(Default, Debug, Copy, Clone, Eq, PartialEq, PartialOrd)]
-#[repr(u64)]
-pub enum MoqtVersion {
-    #[default]
-    kDraft07 = 0xff000007,
-    kUnrecognizedVersionForTests = 0xfe0000ff,
-}
+pub type MoqtVersion = u64;
 
 #[allow(non_upper_case_globals)]
-pub const kDefaultMoqtVersion: MoqtVersion = MoqtVersion::kDraft07;
+pub const kDraft07Version: MoqtVersion = 0xff000007;
+#[allow(non_upper_case_globals)]
+pub const kUnrecognizedVersionForTests: MoqtVersion = 0xfe0000ff;
+#[allow(non_upper_case_globals)]
+pub const kDefaultMoqtVersion: MoqtVersion = kDraft07Version;
 #[allow(non_upper_case_globals)]
 pub const kDefaultInitialMaxSubscribeId: u64 = 100;
 
@@ -136,6 +135,43 @@ pub enum MoqtMessageType {
     kObjectAck = 0x3184,
 }
 
+impl TryFrom<u64> for MoqtMessageType {
+    type Error = ();
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        match value {
+            0x02 => Ok(MoqtMessageType::kSubscribeUpdate),
+            0x03 => Ok(MoqtMessageType::kSubscribe),
+            0x04 => Ok(MoqtMessageType::kSubscribeOk),
+            0x05 => Ok(MoqtMessageType::kSubscribeError),
+            0x06 => Ok(MoqtMessageType::kAnnounce),
+            0x07 => Ok(MoqtMessageType::kAnnounceOk),
+            0x08 => Ok(MoqtMessageType::kAnnounceError),
+            0x09 => Ok(MoqtMessageType::kUnannounce),
+            0x0a => Ok(MoqtMessageType::kUnsubscribe),
+            0x0b => Ok(MoqtMessageType::kSubscribeDone),
+            0x0c => Ok(MoqtMessageType::kAnnounceCancel),
+            0x0d => Ok(MoqtMessageType::kTrackStatusRequest),
+            0x0e => Ok(MoqtMessageType::kTrackStatus),
+            0x10 => Ok(MoqtMessageType::kGoAway),
+            0x11 => Ok(MoqtMessageType::kSubscribeAnnounces),
+            0x12 => Ok(MoqtMessageType::kSubscribeAnnouncesOk),
+            0x13 => Ok(MoqtMessageType::kSubscribeAnnouncesError),
+            0x14 => Ok(MoqtMessageType::kUnsubscribeAnnounces),
+            0x15 => Ok(MoqtMessageType::kMaxSubscribeId),
+            0x16 => Ok(MoqtMessageType::kFetch),
+            0x17 => Ok(MoqtMessageType::kFetchCancel),
+            0x18 => Ok(MoqtMessageType::kFetchOk),
+            0x19 => Ok(MoqtMessageType::kFetchError),
+            0x40 => Ok(MoqtMessageType::kClientSetup),
+            0x41 => Ok(MoqtMessageType::kServerSetup),
+
+            0x3184 => Ok(MoqtMessageType::kObjectAck),
+            _ => Err(()),
+        }
+    }
+}
+
 impl Display for MoqtMessageType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match *self {
@@ -173,18 +209,23 @@ impl Display for MoqtMessageType {
 
 #[allow(non_camel_case_types)]
 #[allow(clippy::enum_variant_names)]
-#[derive(Default, Debug, Copy, Clone, Eq, PartialEq, PartialOrd)]
-#[repr(u64)]
+#[derive(Error, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum MoqtError {
-    #[default]
-    kNoError = 0x0,
-    kInternalError = 0x1,
-    kUnauthorized = 0x2,
-    kProtocolViolation = 0x3,
-    kDuplicateTrackAlias = 0x4,
-    kParameterLengthMismatch = 0x5,
-    kTooManySubscribes = 0x6,
-    kGoawayTimeout = 0x10,
+    #[error("Internal Error")]
+    kInternalError, // = 0x1,
+    #[error("Unauthorized")]
+    kUnauthorized, //= 0x2,
+    #[error("Protocol Violation")]
+    kProtocolViolation, // = 0x3,
+    #[error("Duplicate Track Alias")]
+    kDuplicateTrackAlias, // = 0x4,
+    #[error("Parameter Length Mismatch")]
+    kParameterLengthMismatch, // = 0x5,
+    #[error("Too Many Subscribes")]
+    kTooManySubscribes, // = 0x6,
+    #[error("Goaway Timeout")]
+    kGoawayTimeout, // = 0x10,
 }
 
 // TODO: update with spec-defined error codes once those are available, see
@@ -209,6 +250,19 @@ pub enum MoqtRole {
     //kRoleMax = 0x3,
 }
 
+impl TryFrom<u64> for MoqtRole {
+    type Error = ();
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        match value {
+            0x1 => Ok(MoqtRole::kPublisher),
+            0x2 => Ok(MoqtRole::kSubscriber),
+            0x3 => Ok(MoqtRole::kPubSub),
+            _ => Err(()),
+        }
+    }
+}
+
 #[allow(non_camel_case_types)]
 #[allow(clippy::enum_variant_names)]
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq, PartialOrd)]
@@ -222,6 +276,20 @@ pub enum MoqtSetupParameter {
     /// QUICHE-specific extensions.
     /// Indicates support for OACK messages.
     kSupportObjectAcks = 0xbbf1439,
+}
+
+impl TryFrom<u64> for MoqtSetupParameter {
+    type Error = ();
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        match value {
+            0x0 => Ok(MoqtSetupParameter::kRole),
+            0x1 => Ok(MoqtSetupParameter::kPath),
+            0x2 => Ok(MoqtSetupParameter::kMaxSubscribeId),
+            0x3 => Ok(MoqtSetupParameter::kSupportObjectAcks),
+            _ => Err(()),
+        }
+    }
 }
 
 #[allow(non_camel_case_types)]
@@ -238,6 +306,20 @@ pub enum MoqtTrackRequestParameter {
     kOackWindowSize = 0xbbf1439,
 }
 
+impl TryFrom<u64> for MoqtTrackRequestParameter {
+    type Error = ();
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        match value {
+            0x2 => Ok(MoqtTrackRequestParameter::kAuthorizationInfo),
+            0x3 => Ok(MoqtTrackRequestParameter::kDeliveryTimeout),
+            0x4 => Ok(MoqtTrackRequestParameter::kMaxCacheDuration),
+            0xbbf1439 => Ok(MoqtTrackRequestParameter::kOackWindowSize),
+            _ => Err(()),
+        }
+    }
+}
+
 // TODO: those are non-standard; add standard error codes once those exist, see
 // <https://github.com/moq-wg/moq-transport/issues/393>.
 #[allow(non_camel_case_types)]
@@ -248,6 +330,18 @@ pub enum MoqtAnnounceErrorCode {
     #[default]
     kInternalError = 0,
     kAnnounceNotSupported = 1,
+}
+
+impl TryFrom<u64> for MoqtAnnounceErrorCode {
+    type Error = ();
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        match value {
+            0x0 => Ok(MoqtAnnounceErrorCode::kInternalError),
+            0x1 => Ok(MoqtAnnounceErrorCode::kAnnounceNotSupported),
+            _ => Err(()),
+        }
+    }
 }
 
 #[allow(non_camel_case_types)]
@@ -262,6 +356,22 @@ pub enum SubscribeErrorCode {
     kTrackDoesNotExist = 0x3,
     kUnauthorized = 0x4,
     kTimeout = 0x5,
+}
+
+impl TryFrom<u64> for SubscribeErrorCode {
+    type Error = ();
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        match value {
+            0x0 => Ok(SubscribeErrorCode::kInternalError),
+            0x1 => Ok(SubscribeErrorCode::kInvalidRange),
+            0x2 => Ok(SubscribeErrorCode::kRetryTrackAlias),
+            0x3 => Ok(SubscribeErrorCode::kTrackDoesNotExist),
+            0x4 => Ok(SubscribeErrorCode::kUnauthorized),
+            0x5 => Ok(SubscribeErrorCode::kTimeout),
+            _ => Err(()),
+        }
+    }
 }
 
 struct MoqtSubscribeErrorReason {
@@ -310,8 +420,8 @@ impl FullTrackName {
     }
 
     /// add an element into the last of tuple
-    pub fn add_element(&mut self, element: &str) {
-        self.tuple.push(element.to_string());
+    pub fn add_element(&mut self, element: String) {
+        self.tuple.push(element);
     }
 
     /// Remove the last element to convert a name to a namespace.
@@ -500,6 +610,21 @@ pub enum MoqtFilterType {
     kAbsoluteRange = 0x4,
 }
 
+impl TryFrom<u64> for MoqtFilterType {
+    type Error = ();
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        match value {
+            0x0 => Ok(MoqtFilterType::kNone),
+            0x1 => Ok(MoqtFilterType::kLatestGroup),
+            0x2 => Ok(MoqtFilterType::kLatestObject),
+            0x3 => Ok(MoqtFilterType::kAbsoluteStart),
+            0x4 => Ok(MoqtFilterType::kAbsoluteRange),
+            _ => Err(()),
+        }
+    }
+}
+
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtSubscribeParameters {
     pub(crate) authorization_info: Option<String>,
@@ -619,6 +744,23 @@ pub enum SubscribeDoneCode {
     kExpired = 0x6,
 }
 
+impl TryFrom<u64> for SubscribeDoneCode {
+    type Error = ();
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        match value {
+            0x0 => Ok(SubscribeDoneCode::kUnsubscribed),
+            0x1 => Ok(SubscribeDoneCode::kInternalError),
+            0x2 => Ok(SubscribeDoneCode::kUnauthorized),
+            0x3 => Ok(SubscribeDoneCode::kTrackEnded),
+            0x4 => Ok(SubscribeDoneCode::kSubscriptionEnded),
+            0x5 => Ok(SubscribeDoneCode::kGoingAway),
+            0x6 => Ok(SubscribeDoneCode::kExpired),
+            _ => Err(()),
+        }
+    }
+}
+
 #[derive(Default, Clone, PartialEq, Debug, PartialOrd)]
 pub struct MoqtSubscribeDone {
     pub(crate) subscribe_id: u64,
@@ -671,6 +813,21 @@ pub enum MoqtTrackStatusCode {
     kNotYetBegun = 0x2,
     kFinished = 0x3,
     kStatusNotAvailable = 0x4,
+}
+
+impl TryFrom<u64> for MoqtTrackStatusCode {
+    type Error = ();
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        match value {
+            0x0 => Ok(MoqtTrackStatusCode::kInProgress),
+            0x1 => Ok(MoqtTrackStatusCode::kDoesNotExist),
+            0x2 => Ok(MoqtTrackStatusCode::kNotYetBegun),
+            0x3 => Ok(MoqtTrackStatusCode::kFinished),
+            0x4 => Ok(MoqtTrackStatusCode::kStatusNotAvailable),
+            _ => Err(()),
+        }
+    }
 }
 
 pub fn does_track_status_imply_having_data(code: MoqtTrackStatusCode) -> bool {

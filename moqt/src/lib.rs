@@ -3,6 +3,7 @@
 
 pub mod moqt_framer;
 pub mod moqt_messages;
+pub mod moqt_parser;
 pub mod moqt_priority;
 pub mod quic_types;
 pub mod serde;

@@ -15,17 +15,27 @@ use std::result::Result;
 /// called after failure, as they will also fail immediately.
 pub struct DataReader<'a> {
     data: &'a mut dyn Buf,
+    length: usize,
 }
 
 impl<'a> DataReader<'a> {
     pub fn new(data: &'a mut dyn Buf) -> Self {
-        Self { data }
+        let length = data.remaining();
+        Self { data, length }
     }
 
     // Returns true if the underlying buffer has enough room to read the given
     // amount of bytes.
     pub fn can_read(&self, n: usize) -> bool {
         n <= self.data.remaining()
+    }
+
+    pub fn remaining(&self) -> usize {
+        self.data.remaining()
+    }
+
+    pub fn bytes_read(&self) -> usize {
+        self.length - self.data.remaining()
     }
 
     // Reads an 8/16/24/32/64-bit unsigned integer into the given output
@@ -252,8 +262,12 @@ impl<'a> DataReader<'a> {
     // This should be kept in mind when handling memory management!
     //
     // DOES NOT forward the internal iterator.
-    pub fn peek_remaining_payload(&mut self) -> &[u8] {
+    pub fn peek_remaining_payload(&self) -> &[u8] {
         self.data.chunk()
+    }
+
+    pub fn advance(&mut self, n: usize) {
+        self.data.advance(n);
     }
 
     // Returns the entire payload as a absl::string_view.

@@ -117,7 +117,7 @@ impl LengthWireType for WireVarInt62 {
 
 impl RefWireType<'_, MoqtVersion> for WireVarInt62 {
     fn from_ref(value: &MoqtVersion) -> Self {
-        Self(*value as u64)
+        Self(*value)
     }
 }
 

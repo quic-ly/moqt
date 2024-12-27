@@ -15,6 +15,18 @@ pub enum MoqtDeliveryOrder {
     kDescending = 0x02,
 }
 
+impl TryFrom<u8> for MoqtDeliveryOrder {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0x1 => Ok(MoqtDeliveryOrder::kAscending),
+            0x2 => Ok(MoqtDeliveryOrder::kDescending),
+            _ => Err(()),
+        }
+    }
+}
+
 const fn flip(num_bits: u64, number: u64) -> u64 {
     assert!(num_bits <= 63);
     (1u64 << num_bits) - 1 - number
