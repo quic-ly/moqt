@@ -3,6 +3,7 @@ use crate::moqt_priority::MoqtDeliveryOrder;
 use crate::serde::data_reader::DataReader;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::collections::VecDeque;
+use std::io::ErrorKind::Other;
 use std::io::{Error, ErrorKind};
 use std::time::Duration;
 
@@ -1153,38 +1154,52 @@ impl MoqtControlParser {
     }
 }
 
-/*
 // Parses an MoQT datagram. Returns the payload bytes, or std::nullopt on error.
 // The caller provides the whole datagram in `data`.  The function puts the
 // object metadata in `object_metadata`.
-std::optional<absl::string_view> ParseDatagram(absl::string_view data,
-                                               MoqtObject& object_metadata);
+pub fn parse_datagram<R: Buf>(data: &mut R) -> Result<(MoqtObject, Bytes), Error> {
+    let mut reader = DataReader::new(data);
+    let type_raw = reader.read_var_int62()?;
+    if type_raw != MoqtDataStreamType::kObjectDatagram as u64 {
+        return Err(Error::new(Other, MoqtError::kProtocolViolation));
+    }
 
-// Parser for MoQT unidirectional data stream.
-class QUICHE_EXPORT MoqtDataParser {
- public:
-  // `stream` must outlive the parser.  The parser does not configure itself as
-  // a listener for the read events of the stream; it is responsibility of the
-  // caller to do so via one of the read methods below.
-  explicit MoqtDataParser(quiche::ReadStream* stream,
-                          MoqtDataParserVisitor* visitor)
-      : stream_(*stream), visitor_(*visitor) {}
+    let track_alias = reader.read_var_int62()?;
+    let group_id = reader.read_var_int62()?;
+    let object_id = reader.read_var_int62()?;
+    let publisher_priority = reader.read_uint8()?;
+    let payload_length = reader.read_var_int62()?;
+    let mut object_metadata = MoqtObject {
+        track_alias,
+        group_id,
+        object_id,
+        publisher_priority,
+        object_status: Default::default(),
+        subgroup_id: None,
+        payload_length,
+    };
 
-  // Reads all of the available objects on the stream.
-  void ReadAllData();
+    if payload_length > 0 {
+        object_metadata.object_status = MoqtObjectStatus::kNormal;
+    } else {
+        let object_status_raw = reader.read_var_int62()?;
+        object_metadata.object_status = MoqtObjectStatus::from(object_status_raw);
+        if object_metadata.object_status == MoqtObjectStatus::kInvalidObjectStatus {
+            return Err(Error::new(Other, MoqtError::kProtocolViolation));
+        }
+    }
+    if reader.remaining() != object_metadata.payload_length as usize {
+        return Err(Error::new(Other, MoqtError::kProtocolViolation));
+    }
+    Ok((object_metadata, reader.read_remaining_payload()))
+}
 
-  void ReadStreamType();
-  void ReadTrackAlias();
-  void ReadAtMostOneObject();
-
-  // Returns the type of the unidirectional stream, if already known.
-  std::optional<MoqtDataStreamType> stream_type() const { return type_; }
-
- private:
-  friend class test::MoqtDataParserPeer;
-
-  // Current state of the parser.
-  enum NextInput {
+// Current state of the parser.
+#[allow(non_camel_case_types)]
+#[allow(clippy::enum_variant_names)]
+#[derive(Default, Debug, Copy, Clone, PartialEq, PartialOrd)]
+enum NextInput {
+    #[default]
     kStreamType,
     kTrackAlias,
     kGroupId,
@@ -1196,54 +1211,324 @@ class QUICHE_EXPORT MoqtDataParser {
     kData,
     kPadding,
     kFailed,
-  };
+}
 
-  // If a StopCondition callback returns true, parsing will terminate.
-  using StopCondition = quiche::UnretainedCallback<bool()>;
+struct State {
+    next_input: NextInput,
+    payload_remaining: usize,
+}
 
-  struct State {
-    NextInput next_input;
-    uint64_t payload_remaining;
+/// Parser for MoQT unidirectional data stream.
+pub struct MoqtDataParser {
+    events: VecDeque<MoqtDataParserEvent>,
 
-    bool operator==(const State&) const = default;
-  };
-  State state() const { return State{next_input_, payload_length_remaining_}; }
+    no_more_data: bool,
+    parsing_error: bool,
 
-  void ReadDataUntil(StopCondition stop_condition);
+    buffered_message: Option<BytesMut>,
 
-  // Reads a single varint from the underlying stream.
-  std::optional<uint64_t> read_var_int62(bool& fin_read);
-  // Reads a single varint from the underlying stream. Triggers a parse error if
-  // a FIN has been encountered.
-  std::optional<uint64_t> ReadVarInt62NoFin();
-  // Reads a single uint8 from the underlying stream. Triggers a parse error if
-  // a FIN has been encountered.
-  std::optional<uint8_t> ReadUint8NoFin();
+    data_stream_type: Option<MoqtDataStreamType>,
+    next_input: NextInput,
+    metadata: MoqtObject,
+    payload_length_remaining: usize,
+    num_objects_read: usize,
 
-  // Advances the state machine of the parser to the next expected state.
-  void AdvanceParserState();
-  // Reads the next available item from the stream.
-  void ParseNextItemFromStream();
-  // Checks if we have encountered a FIN without data.  If so, processes it and
-  // returns true.
-  bool CheckForFinWithoutData();
+    processing: bool,
+}
 
-  void parse_error(absl::string_view reason);
+impl Default for MoqtDataParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-  quiche::ReadStream& stream_;
-  MoqtDataParserVisitor& visitor_;
+impl MoqtDataParser {
+    // `stream` must outlive the parser.  The parser does not configure itself as
+    // a listener for the read events of the stream; it is responsibility of the
+    // caller to do so via one of the read methods below.
+    pub fn new() -> Self {
+        Self {
+            events: VecDeque::new(),
+            no_more_data: false, // Fatal error or fin. No more parsing.
+            parsing_error: false,
+            buffered_message: None,
+            data_stream_type: None,
+            next_input: NextInput::kStreamType,
+            metadata: MoqtObject::default(),
+            payload_length_remaining: 0,
+            num_objects_read: 0,
+            processing: false, // True if currently in ProcessData(), to prevent re-entrancy.
+        }
+    }
 
-  bool no_more_data_ = false;  // Fatal error or fin. No more parsing.
-  bool parsing_error_ = false;
+    /// process all of the available objects on the stream.
+    pub fn process_data<R: Buf>(&mut self, _data: &mut R, _fin: bool) {}
+    /*
 
-  std::string buffered_message_;
+    // Returns the type of the unidirectional stream, if already known.
+    std::optional<MoqtDataStreamType> stream_type() const { return type_; }
+    void ReadStreamType();
+    void ReadTrackAlias();
+    void ReadAtMostOneObject();
+    void ReadDataUntil(StopCondition stop_condition);*/
 
-  std::optional<MoqtDataStreamType> type_ = std::nullopt;
-  NextInput next_input_ = kStreamType;
-  MoqtObject metadata_;
-  size_t payload_length_remaining_ = 0;
-  size_t num_objects_read_ = 0;
+    // Reads a single varint from the underlying stream.
+    fn read_var_int62<R: Buf>(&mut self, data: &mut R) -> Option<u64> {
+        if !data.has_remaining() {
+            return None;
+        }
+        let first_byte = data.chunk()[0];
+        let varint_size = 1usize << ((first_byte & 0b11000000) >> 6);
+        if data.remaining() < varint_size {
+            return None;
+        }
 
-  bool processing_ = false;  // True if currently in ProcessData(), to prevent
-                             // re-entrancy.
-};*/
+        let mut reader = DataReader::new(data);
+        let v = match reader.read_var_int62() {
+            Ok(v) => v,
+            Err(_) => return None,
+        };
+        data.advance(varint_size);
+
+        Some(v)
+    }
+    // Reads a single varint from the underlying stream. Triggers a parse error if
+    // a FIN has been encountered.
+    fn read_var_int62_no_fin<R: Buf>(&mut self, data: &mut R, fin: bool) -> Option<u64> {
+        let v = self.read_var_int62(data);
+        if fin && !data.has_remaining() {
+            self.parse_error(
+                MoqtError::kProtocolViolation,
+                "Unexpected FIN received in the middle of a header",
+            );
+            return None;
+        }
+        v
+    }
+    // Reads a single uint8 from the underlying stream. Triggers a parse error if
+    // a FIN has been encountered.
+    fn read_uint8_no_fin<R: Buf>(&mut self, data: &mut R, fin: bool) -> Option<u8> {
+        if fin && data.remaining() <= 1 {
+            self.parse_error(
+                MoqtError::kProtocolViolation,
+                "Unexpected FIN received in the middle of a header",
+            );
+            return None;
+        }
+        if !data.has_remaining() {
+            return None;
+        }
+        Some(data.get_u8())
+    }
+    // Advances the state machine of the parser to the next expected state.
+    fn advance_parser_state(&mut self) {
+        assert!(
+            self.data_stream_type == Some(MoqtDataStreamType::kStreamHeaderSubgroup)
+                || self.data_stream_type == Some(MoqtDataStreamType::kStreamHeaderFetch)
+        );
+        let is_fetch = self.data_stream_type == Some(MoqtDataStreamType::kStreamHeaderFetch);
+        self.next_input = match self.next_input   {
+            // The state table is factored into a separate function (rather than
+            // inlined) in order to separate the order of elements from the way they are
+            // parsed.
+            NextInput:: kStreamType=>NextInput::kTrackAlias,
+            NextInput:: kTrackAlias=>NextInput::kGroupId,
+            NextInput:: kGroupId=>NextInput::kSubgroupId,
+            NextInput:: kSubgroupId=> if is_fetch { NextInput::kObjectId } else{NextInput::kPublisherPriority},
+            NextInput:: kPublisherPriority=> if  is_fetch {NextInput::kObjectPayloadLength }else {NextInput::kObjectId},
+            NextInput:: kObjectId=> if is_fetch {NextInput::kPublisherPriority }else {NextInput::kObjectPayloadLength}
+            NextInput:: kStatus|
+            NextInput:: kData=> if is_fetch {NextInput::kGroupId }else{NextInput::kObjectId},
+            NextInput:: kObjectPayloadLength|  // Either kStatus or kData depending on length.
+            NextInput:: kPadding|              // Handled separately.
+            NextInput:: kFailed =>{ // Should cause parsing to cease.
+                self.next_input
+            }
+      };
+    }
+
+    // Reads the next available item from the stream.
+    fn parse_next_item_from_stream<R: Buf>(&mut self, _data: &mut R, _fin: bool) {
+        //if self.check_for_fin_without_data(data, fin) {
+        //    return;
+        //}
+        /*
+        match self.next_input {
+          NextInput::kStreamType=> {
+            std::optional<uint64_t> value_read = read_var_int62no_fin();
+            if (value_read.has_value()) {
+              if (!IsAllowedStreamType(*value_read)) {
+                ParseError("Invalid stream type supplied");
+                return;
+              }
+              type_ = static_cast<MoqtDataStreamType>(*value_read);
+              switch (*type_) {
+                case MoqtDataStreamType::kStreamHeaderSubgroup:
+                case MoqtDataStreamType::kStreamHeaderFetch:
+                  advance_parser_state();
+                  break;
+                case MoqtDataStreamType::kPadding:
+                  next_input_ = kPadding;
+                  break;
+                case MoqtDataStreamType::kObjectDatagram:
+                  QUICHE_BUG(ParseDataFromStream_kStreamType_unexpected);
+                  return;
+              }
+            }
+            return;
+          }
+
+          NextInput:: kTrackAlias=>{
+            std::optional<uint64_t> value_read = read_var_int62no_fin();
+            if (value_read.has_value()) {
+              metadata_.track_alias = *value_read;
+              advance_parser_state();
+            }
+            return;
+          }
+
+          NextInput:: kGroupId=> {
+            std::optional<uint64_t> value_read = read_var_int62no_fin();
+            if (value_read.has_value()) {
+              metadata_.group_id = *value_read;
+              advance_parser_state();
+            }
+            return;
+          }
+
+          NextInput:: kSubgroupId=>{
+            std::optional<uint64_t> value_read = read_var_int62no_fin();
+            if (value_read.has_value()) {
+              metadata_.subgroup_id = *value_read;
+              advance_parser_state();
+            }
+            return;
+          }
+
+          NextInput:: kPublisherPriority=> {
+            std::optional<uint8_t> value_read = read_uint8no_fin();
+            if (value_read.has_value()) {
+              metadata_.publisher_priority = *value_read;
+              advance_parser_state();
+            }
+            return;
+          }
+
+          NextInput:: kObjectId=> {
+            std::optional<uint64_t> value_read = read_var_int62no_fin();
+            if (value_read.has_value()) {
+              metadata_.object_id = *value_read;
+              advance_parser_state();
+            }
+            return;
+          }
+
+          NextInput:: kObjectPayloadLength=> {
+            std::optional<uint64_t> value_read = read_var_int62no_fin();
+            if (value_read.has_value()) {
+              metadata_.payload_length = *value_read;
+              payload_length_remaining_ = *value_read;
+              if (metadata_.payload_length > 0) {
+                metadata_.object_status = MoqtObjectStatus::kNormal;
+                next_input_ = kData;
+              } else {
+                next_input_ = kStatus;
+              }
+            }
+            return;
+          }
+
+          NextInput:: kStatus=> {
+            bool fin_read = false;
+            std::optional<uint64_t> value_read = ReadVarInt62(fin_read);
+            if (value_read.has_value()) {
+              metadata_.object_status = IntegerToObjectStatus(*value_read);
+              if (metadata_.object_status == MoqtObjectStatus::kInvalidObjectStatus) {
+                ParseError("Invalid object status provided");
+                return;
+              }
+
+              ++num_objects_read_;
+              visitor_.OnObjectMessage(metadata_, "", /*end_of_message=*/true);
+              advance_parser_state();
+            }
+            if (fin_read) {
+              no_more_data_ = true;
+              return;
+            }
+            return;
+          }
+
+          NextInput:: kData=> {
+            while (payload_length_remaining_ > 0) {
+              quiche::ReadStream::PeekResult peek_result =
+                  stream_.PeekNextReadableRegion();
+              if (!peek_result.has_data()) {
+                return;
+              }
+              if (peek_result.fin_next && payload_length_remaining_ > 0) {
+                ParseError("FIN received at an unexpected point in the stream");
+                return;
+              }
+
+              size_t chunk_size =
+                  std::min(payload_length_remaining_, peek_result.peeked_data.size());
+              payload_length_remaining_ -= chunk_size;
+              bool done = payload_length_remaining_ == 0;
+              visitor_.OnObjectMessage(
+                  metadata_, peek_result.peeked_data.substr(0, chunk_size), done);
+              const bool fin = stream_.SkipBytes(chunk_size);
+              if (done) {
+                ++num_objects_read_;
+                no_more_data_ |= fin;
+                advance_parser_state();
+              }
+            }
+            return;
+          }
+
+          NextInput:: kPadding=> {
+              no_more_data_ |= stream_.SkipBytes(stream_.ReadableBytes());
+              return;
+          }
+
+          NextInput:: kFailed => {
+              return;
+          }
+        }*/
+    }
+
+    // Checks if we have encountered a FIN without data.  If so, processes it and
+    // returns true.
+    fn check_for_fin_without_data<R: Buf>(&mut self, data: &mut R, fin: bool) -> bool {
+        if !fin {
+            return false;
+        }
+        let valid_state = (self.data_stream_type
+            == Some(MoqtDataStreamType::kStreamHeaderSubgroup)
+            && self.next_input == NextInput::kObjectId)
+            || (self.data_stream_type == Some(MoqtDataStreamType::kStreamHeaderFetch)
+                && self.next_input == NextInput::kGroupId);
+        if !valid_state || self.num_objects_read == 0 {
+            self.parse_error(
+                MoqtError::kProtocolViolation,
+                "FIN received at an unexpected point in the stream",
+            );
+            return true;
+        }
+        !data.has_remaining()
+    }
+
+    fn parse_error(&mut self, error: MoqtError, reason: &str) {
+        // Don't send multiple parse errors.
+        if !self.parsing_error {
+            self.next_input = NextInput::kFailed;
+            self.no_more_data = true;
+            self.parsing_error = true;
+            self.events.push_back(MoqtDataParserEvent::OnParsingError(
+                error,
+                reason.to_string(),
+            ));
+        }
+    }
+}
